@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration and editor state
+.env
+.env.local
+.env.*.local
+!.env.example
+.DS_Store
+.vscode/
+.idea/
+.claude/
+
+# Runtime and generated data
+chroma_db/
+data/
+cross-encoder/
+model/
+evaluation/reports/
+runtime/
+*.sqlite3
+
+# Large model/checkpoint files
+*.bin
+*.safetensors
+*.onnx
+
+# Local scratch files accidentally created by shell/curl commands
+/--query
+/--top-k
+/-H
+/-d
+/curl
+
+# Internal planning notes
+/PLAN_副本.md

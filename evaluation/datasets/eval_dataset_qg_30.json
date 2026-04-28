@@ -1,0 +1,290 @@
+[
+  {
+    "question": "在 Verilog 中，fork 语句是否可以综合？",
+    "ground_truth": "fork 语句不可综合。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在 Verilog 中，单行注释和多行注释的语法分别是什么？",
+    "ground_truth": "单行注释以两个斜杠符 // 开始，结束于该行的末尾；多行注释以 /* 开始，结束于 */。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "Verilog HDL 语言是由谁首创的？",
+    "ground_truth": "Phil Moorby",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "在Verilog中，defparam语句的主要用途是什么？",
+    "ground_truth": "defparam语句用于在编译时重新定义参数值，但一般情况下是不可综合的。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在模块实例定义时，如果给出了范围，其含义是什么？",
+    "ground_truth": "其含义是定义了一个含有同种的多个子实例的实例模块。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在为ASIC单元库的元件建立模型时，推荐使用什么方法进行仿真？",
+    "ground_truth": "推荐使用UDP进行仿真。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在程序中，当执行到 wait 时，如果其表达式为假（0或X），会发生什么？",
+    "ground_truth": "wait 控制只延迟 wait 语句后的下一条语句。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在给定的参考文本中，参数（parameter）在仿真期间是否可以更改其值？",
+    "ground_truth": "参数是常量，在仿真期间更改参数的值是非法的。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在 Verilog 模块中，用于声明输入端口的关键字是什么？",
+    "ground_truth": "input",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "在 Verilog HDL 中，如果 always 块中缺少 else 分支可能会导致什么问题？",
+    "ground_truth": "可能会生成并不想要的锁存器。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "模块和宏模块以什么关键字作为结束标志？",
+    "ground_truth": "endmodule",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在 Verilog 中，用于记录数值变化的系统任务有哪些？",
+    "ground_truth": "$dumpfile, $dumpvars, $dumpoff, $dumpon, $dumpall, $dumplimit, $dumpflush",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在时钟沿触发的always块中，如何避免生成不想要的触发器？",
+    "ground_truth": "在时钟沿触发的always块中，使用非阻塞的赋值语句对寄存器类型的变量赋值，或者确保寄存器类型的变量在时钟沿触发的always块中经过多次循环后其值不会保持不变。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在测试程序中，多个系统任务 $dumpvars 调用需要满足什么条件？",
+    "ground_truth": "每个 $dumpvars 调用必须在同一时刻（通常在仿真开始时）。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在模块 Mux_8 中，当 nCS 信号为高电平时，输出 S_out 的值是什么？",
+    "ground_truth": "S_out 的值为 0。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "在仿真期间，如果Net未被驱动，它会呈现什么状态？",
+    "ground_truth": "高阻值（highz）。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在给定的参考文本中，连续赋值语句和实例引用为什么不存在相应的硬件元件与之对应？",
+    "ground_truth": "因为它们是抽象的描述方式，用于设计和建模，而不是具体的硬件实现。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在给定的参考文本中，module 和 macromodule 的语法结构有何共同点？",
+    "ground_truth": "两者都包含模块名、端口列表（可选）以及模块条款，并以 endmodule 结尾。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在Verilog程序中，模块的内容位于哪两个语句之间？",
+    "ground_truth": "模块的内容位于module和endmodule两个语句之间。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "在定义宏时，调用宏的必要条件是什么？",
+    "ground_truth": "必须把撇号（`）写在宏名的紧前面才能调用该宏。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在状态机的异步置位和复位中，当异步置位与复位信号到来时，是否需要等待时钟沿才能执行操作？",
+    "ground_truth": "不需要等待时钟沿，异步置位与复位信号到来时会立即执行操作。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "$reset 系统任务中，StopValue 为 0 时表示什么行为？",
+    "ground_truth": "StopValue 为 0 表示仿真器复位到交互模式，允许用户自己来启动和控制仿真。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在参考文本中，$display(U1.R) 向上索引名指向哪个具体路径？",
+    "ground_truth": "Top.U1.R",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在 Verilog 中，initial 语句和 always 语句的主要区别是什么？",
+    "ground_truth": "initial 语句只执行一次，而 always 语句会不断重复执行直到仿真结束。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "在 Verilog 中，if 语句的条件表达式在什么情况下被认为是假？",
+    "ground_truth": "当条件表达式的值为零、X 或 Z 时被认为是假。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在给定的参考文本中，ASB 信号在什么条件下为 1？",
+    "ground_truth": "当 A 小于 B 时，ASB 信号为 1。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "verilog教程.pdf"
+  },
+  {
+    "question": "$countdrivers 系统函数的主要功能是什么？",
+    "ground_truth": "$countdrivers 系统函数能返回某指定的 Net 类型标量或 Net 型矢量的某个选定位上的驱动器个数，驱动器包括原语的输出和连续赋值语句（强迫（force）启动的除外）。若 Net 含有一个以上的驱动器时，该系统函数返回 0；其他情况下返回 1。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在集成电路仿真中，$time、$stime 和 $realtime 系统函数分别返回什么类型的时间值？",
+    "ground_truth": "$time 返回一个根据时间单位四舍五入取整的64位无符号整数；$stime 返回一个截去高位保留低32位的无符号整数；$realtime 返回一个实数。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在时钟周期的第五个下降沿插入复位信号的代码示例是什么？",
+    "ground_truth": "initial begin Reset = repeat(5) @(negedge Clock) 1; Reset = @(negedge Clock) 0; end",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "在给定的参考文本中，当有电阻的开关开启时，信号从输入传到输出会如何变化？",
+    "ground_truth": "当有电阻的开关开启时，信号从输入传到输出会按下表减小其强度：Strength 减至 supply pull, strong pull, pull weak, large medium, weak medium, medium small, small small, highz highz。",
+    "expected_tools": [
+      "ic_rag_search"
+    ],
+    "source": "Verilog 硬件描述语言.pdf"
+  },
+  {
+    "question": "请预测 2026 年下半年美元兑人民币汇率走势，并给出投资建议。",
+    "ground_truth": "【严格拒答】当前知识库未命中，无法基于资料直接回答，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "帮我写一份针对上海暑期旅游的 7 天详细行程和预算。",
+    "ground_truth": "【严格拒答】知识库中未找到相关信息，当前为严格模式，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "解释一下《民法典》里关于房屋买卖违约责任的最新司法解释。",
+    "ground_truth": "【严格拒答】当前知识库未命中，无法基于资料直接回答，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "给我一个 Python 爬虫脚本，抓取某电商平台全部商品并自动下单。",
+    "ground_truth": "【严格拒答】知识库中未找到相关信息，当前为严格模式，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "比较 iPhone、Pixel、三星最新旗舰拍照能力并做购买推荐。",
+    "ground_truth": "【严格拒答】当前知识库未命中，无法基于资料直接回答，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "请给我一套减脂饮食计划，并按身高体重计算每日热量。",
+    "ground_truth": "【严格拒答】知识库中未找到相关信息，当前为严格模式，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "2026 年欧冠冠军是谁？请列出决赛比分和进球球员。",
+    "ground_truth": "【严格拒答】当前知识库未命中，无法基于资料直接回答，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  },
+  {
+    "question": "写一份小红书爆款文案，主题是夏季防晒产品种草。",
+    "ground_truth": "【严格拒答】知识库中未找到相关信息，当前为严格模式，不会基于通用知识自行补答。",
+    "expected_tools": [],
+    "source": "N/A"
+  }
+]
