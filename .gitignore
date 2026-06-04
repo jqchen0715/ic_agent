@@ -29,6 +29,7 @@ model/
 evaluation/reports/
 runtime/
 *.sqlite3
+*.pdf
 
 # Large model/checkpoint files
 *.bin
