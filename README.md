@@ -18,11 +18,18 @@
 
 - `/api/v1/chat` 默认走 LangGraph 主链路：
   `pre_tool_router -> tool_executor -> answer_generator`。
+- `/api/v1/agent/run` 提供强自主 Agent 模式：
+  `plan -> execute tools/reasoning -> recover -> reflect -> finalize`。
 - `pre_tool_router` 会按意图挑选 `ic_rag_search / verilog_code_analyzer / timing_constraint_suggester`。
 - 对过短问题（如“乘法器”“时序”）先返回澄清问题，避免直接长答。
 - `POST /api/v1/chat`（非流式）返回：`answer`、`trace_id`、`sources`、`tool_events`（兼容保留 `content`）。
 - `POST /api/v1/chat/stream`（SSE）同样走 Agent 主链路，固定事件为：`tool_call`、`tool_result`、`answer`、`citation`、`done`、`error`。
+- `POST /api/v1/agent/run` 返回自主任务的 `steps`、工具观察、失败恢复、`reflection` 与最终交付。
 - 最终答案中的“参考资料”由服务端重写生成，仅允许本轮真实检索到的 `source/page`，伪引用会被移除并提示。
+- 默认启用会话记忆：响应会返回 `conversation_id`，后续请求带上同一个 ID
+  即可复用短期历史与长期召回记忆；本地记忆默认保存在 `data/memory`。
+- 长期记忆可切换到 Milvus：设置 `MEMORY_BACKEND=milvus` 后会自动创建
+  `agent_memory` 集合；若 Milvus 不可用，会自动退回本地 JSONL。
 
 ## 模块职责
 

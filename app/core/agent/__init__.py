@@ -2,6 +2,7 @@
 """Agent 编排核心模块：编排器、ReAct、规划与反思。"""
 
 from .langgraph_agent import LangGraphAgentResult, LangGraphICAgent
+from .autonomous import AgentTaskStore, AutonomousAgent
 from .orchestrator import AgentOrchestrator, AgentResponse, IntentContext
 from .react_agent import AgentResult, ReActAgent
 from .planner import PlannerAgent, SubTask
@@ -10,6 +11,8 @@ from .reflection import ReflectionAgent, ReflectionReport
 __all__ = [
     "LangGraphICAgent",
     "LangGraphAgentResult",
+    "AutonomousAgent",
+    "AgentTaskStore",
     "AgentOrchestrator",
     "AgentResponse",
     "IntentContext",

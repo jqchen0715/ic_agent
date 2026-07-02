@@ -114,8 +114,10 @@ class LongTermMemory:
 
         def _sync() -> list[MemoryItem]:
             vec = self._embed.embed_query(query)
-            # 转义单引号，避免 expr 注入
-            sid = session_id.replace("'", "\\'")
+            if hasattr(self._coll, "load"):
+                self._coll.load()
+            # 转义反斜杠与双引号，避免 expr 注入
+            sid = session_id.replace("\\", "\\\\").replace('"', '\\"')
             expr = f'{self.session_field} == "{sid}"'
             out = self._coll.search(
                 data=[vec],

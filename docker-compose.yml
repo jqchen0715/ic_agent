@@ -11,6 +11,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       MILVUS_HOST: milvus
       MILVUS_PORT: "19530"
+      MEMORY_BACKEND: milvus
+      MEMORY_MILVUS_COLLECTION_NAME: agent_memory
+      MEMORY_EMBEDDING_MODEL_PATH: BAAI/bge-m3
+      MEMORY_EMBEDDING_DEVICE: cpu
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       postgres:

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IC-Expert Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-panel">
+          <img src="/static/assets/ic-workbench.png" alt="" class="brand-image" />
+          <div class="brand-shade"></div>
+          <div class="brand-copy">
+            <div class="brand-mark">IC-Expert</div>
+            <h1>Agent Console</h1>
+          </div>
+        </div>
+
+        <div class="session-panel">
+          <div class="panel-row">
+            <span class="label">会话</span>
+            <button class="icon-button" id="newSessionButton" title="新会话" type="button">
+              <i data-lucide="plus"></i>
+            </button>
+          </div>
+          <div class="session-id" id="conversationId">未开始</div>
+          <div class="panel-row compact">
+            <span class="status-dot" id="memoryDot"></span>
+            <span id="memoryState">记忆待连接</span>
+          </div>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="上下文面板">
+          <button class="tab active" data-panel="tools" type="button">工具</button>
+          <button class="tab" data-panel="sources" type="button">引用</button>
+        </div>
+
+        <section class="side-list active" id="toolsPanel" aria-live="polite"></section>
+        <section class="side-list" id="sourcesPanel" aria-live="polite"></section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">FastAPI · LangGraph · Memory</div>
+            <h2>IC/Verilog 问答工作台</h2>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" id="clearButton" title="清空当前消息" type="button">
+              <i data-lucide="trash-2"></i>
+            </button>
+            <button class="icon-button" id="copyButton" title="复制会话 ID" type="button">
+              <i data-lucide="copy"></i>
+            </button>
+          </div>
+        </header>
+
+        <div class="mode-switch" role="tablist" aria-label="工作模式">
+          <button class="mode-button active" data-mode="chat" type="button">
+            <i data-lucide="messages-square"></i>
+            <span>对话</span>
+          </button>
+          <button class="mode-button" data-mode="agent" type="button">
+            <i data-lucide="workflow"></i>
+            <span>自主任务</span>
+          </button>
+        </div>
+
+        <section class="agent-panel" id="agentPanel" aria-live="polite">
+          <form class="task-form" id="taskForm">
+            <textarea
+              id="taskInput"
+              rows="3"
+              maxlength="5000"
+              placeholder="输入一个目标，例如：分析这个 Verilog 模块的时序风险，并给出 SDC 建议和优化报告"
+            ></textarea>
+            <div class="task-actions">
+              <label>
+                <span>步骤上限</span>
+                <input id="maxStepsInput" type="number" min="1" max="10" value="6" />
+              </label>
+              <button class="run-button" id="runTaskButton" type="submit">
+                <i data-lucide="play"></i>
+                <span>执行</span>
+              </button>
+            </div>
+          </form>
+          <section class="task-output" id="taskOutput"></section>
+        </section>
+
+        <section class="quick-prompts" aria-label="快捷问题">
+          <button type="button" data-prompt="setup 和 hold 违例分别怎么优化？">
+            setup/hold 优化
+          </button>
+          <button type="button" data-prompt="Verilog 里阻塞赋值和非阻塞赋值有什么区别？">
+            阻塞/非阻塞
+          </button>
+          <button type="button" data-prompt="SDC 里 create_clock 和 false path 怎么写？">
+            SDC 约束
+          </button>
+        </section>
+
+        <section class="chat-log" id="chatLog" aria-live="polite"></section>
+
+        <form class="composer" id="chatForm">
+          <textarea
+            id="promptInput"
+            rows="1"
+            maxlength="4000"
+            autocomplete="off"
+            placeholder="输入 IC、Verilog、SDC 或时序相关问题"
+          ></textarea>
+          <button class="send-button" id="sendButton" type="submit" title="发送">
+            <i data-lucide="send-horizontal"></i>
+          </button>
+        </form>
+      </main>
+    </div>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

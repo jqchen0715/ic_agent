@@ -217,6 +217,7 @@ class ICRAGSearchTool(BaseTool):
         super().__init__()
         self.name = "ic_rag_search"
         self.description = "IC领域专业知识检索工具"
+        self.risk_level = "high"
         self.parameters = [
             ToolParameter(
                 name="query",
@@ -261,6 +262,10 @@ class ICRAGSearchTool(BaseTool):
                 "query": query,
                 "expanded_query": expanded_query,
                 "results": [],
+                "evidence": [],
+                "confidence": "low",
+                "review_flags": ["rag_no_results"],
+                "summary": "知识库中未找到相关信息。",
                 "reason": "知识库中未找到相关信息。",
             }
 
@@ -298,6 +303,10 @@ class ICRAGSearchTool(BaseTool):
                 "query": query,
                 "expanded_query": expanded_query,
                 "results": [],
+                "evidence": [],
+                "confidence": "low",
+                "review_flags": ["rag_weak_evidence"],
+                "summary": "知识库中未找到足够相关的信息。",
                 "reason": "知识库中未找到足够相关的信息，请补充更具体的问题（例如：乘法器的结构/时序优化/Verilog实现）。",
             }
 
@@ -305,6 +314,20 @@ class ICRAGSearchTool(BaseTool):
             "query": query,
             "expanded_query": expanded_query,
             "results": structured,
+            "evidence": [
+                {
+                    "type": "retrieval",
+                    "source": item["source"],
+                    "page": item["page"],
+                    "chunk_id": item["chunk_id"],
+                    "score": item["score"],
+                    "content": item["content"],
+                }
+                for item in structured
+            ],
+            "confidence": "high" if len(structured) >= 2 else "medium",
+            "review_flags": [],
+            "summary": f"检索到 {len(structured)} 条可引用知识库片段。",
         }
 
 
@@ -315,6 +338,7 @@ class VerilogCodeAnalyzerTool(BaseTool):
         super().__init__()
         self.name = "verilog_code_analyzer"
         self.description = "Verilog代码静态审查工具"
+        self.risk_level = "high"
         self.parameters = [
             ToolParameter(
                 name="verilog_code",
@@ -324,37 +348,113 @@ class VerilogCodeAnalyzerTool(BaseTool):
             )
         ]
 
-    async def execute(self, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
         verilog_code = str(kwargs.get("verilog_code", "")).strip()
         if not verilog_code:
             raise ValueError("参数 verilog_code 不能为空")
 
-        analysis: list[str] = []
+        findings: list[dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
+        review_flags: list[str] = []
         code_lower = verilog_code.lower()
+        lines = verilog_code.splitlines()
 
-        if (
-            "always @(*)" in verilog_code
-            or ("always_comb" not in verilog_code and "always @(" not in verilog_code)
-        ):
-            if any(kw in verilog_code for kw in ["if", "case", "else"]) and "else" not in verilog_code:
-                analysis.append("⚠️ 可能存在 latch 推断（always块缺少完整else或default）")
+        def add_finding(
+            severity: str,
+            message: str,
+            flag: str | None = None,
+            line_no: int | None = None,
+            snippet: str | None = None,
+        ) -> None:
+            finding: dict[str, Any] = {"severity": severity, "message": message}
+            if line_no is not None:
+                finding["line"] = line_no
+            if snippet:
+                finding["snippet"] = snippet.strip()
+            findings.append(finding)
+            if flag:
+                review_flags.append(flag)
+            if line_no is not None or snippet:
+                evidence.append(
+                    {
+                        "type": "code",
+                        "source": "user_input",
+                        "line": line_no,
+                        "content": (snippet or "").strip(),
+                    }
+                )
 
-        if "always @" in verilog_code and "@(*)" not in verilog_code and "always_comb" not in verilog_code:
-            analysis.append("⚠️ 建议使用 always_comb 或 always @(*)，避免不完整敏感列表导致综合后功能不一致")
+        always_blocks = _extract_always_blocks(verilog_code)
 
-        if "<=" in verilog_code and "=" in verilog_code and "always @" in verilog_code:
-            analysis.append("⚠️ 请确认 always 块中 <=（非阻塞）和 =（阻塞）使用是否正确（时序逻辑必须用 <=）")
+        for start_line, header, body in always_blocks:
+            header_lower = header.lower()
+            body_lower = body.lower()
+            if ("@*" in header_lower or "@(*)" in header_lower or "always_comb" in header_lower) and (
+                ("if" in body_lower and "else" not in body_lower)
+                or ("case" in body_lower and "default" not in body_lower)
+            ):
+                add_finding(
+                    "warning",
+                    "组合逻辑 always 块可能缺少完整 else/default，存在 latch 推断风险。",
+                    "possible_latch",
+                    start_line,
+                    header,
+                )
 
-        if "rst" in code_lower and "posedge" in code_lower and "negedge" not in code_lower:
-            analysis.append("✅ 检测到异步复位风格（推荐）")
-        elif "rst" in code_lower:
-            analysis.append("⚠️ 检测到同步复位，建议确认是否为设计意图")
+            if "always @" in header_lower and "@*" not in header_lower and "@(*)" not in header_lower:
+                sensitivity = _extract_sensitivity(header)
+                if not any(edge in sensitivity for edge in ("posedge", "negedge")):
+                    add_finding(
+                        "warning",
+                        "组合逻辑建议使用 always_comb 或 always @(*)，避免不完整敏感列表。",
+                        "incomplete_sensitivity_list",
+                        start_line,
+                        header,
+                    )
 
-        if not analysis:
-            analysis.append("✅ 代码通过基础静态审查，未发现明显IC设计常见问题")
+            has_nonblocking = "<=" in body
+            has_blocking = bool(re.search(r"(?<![<>=!])=(?!=)", body))
+            if has_nonblocking and has_blocking:
+                add_finding(
+                    "warning",
+                    "同一个 always 块中混用阻塞赋值和非阻塞赋值，请确认组合/时序边界。",
+                    "mixed_blocking_nonblocking",
+                    start_line,
+                    header,
+                )
 
-        result = "\n".join(analysis)
-        return f"【Verilog代码审查报告】\n{result}\n\n提示：如需更深度分析，请提供完整模块代码。"
+        reset_terms = ("rst", "reset")
+        has_reset = any(term in code_lower for term in reset_terms)
+        if has_reset:
+            async_reset = any(
+                any(term in _extract_sensitivity(header).lower() for term in reset_terms)
+                for _, header, _ in always_blocks
+            )
+            if async_reset:
+                add_finding("info", "检测到异步复位敏感列表，请确认复位极性与项目规范一致。")
+            else:
+                add_finding(
+                    "info",
+                    "检测到同步复位写法，请确认这是设计意图，并检查复位释放时序。",
+                    "sync_reset_review",
+                )
+
+        if not findings:
+            findings.append({"severity": "pass", "message": "基础静态审查未发现明显 IC 设计常见问题。"})
+
+        if len(verilog_code) < 80 or "module" not in code_lower:
+            review_flags.append("input_may_be_incomplete")
+
+        summary = "；".join(item["message"] for item in findings[:4])
+        return {
+            "summary": summary,
+            "findings": findings,
+            "evidence": evidence,
+            "confidence": "medium" if review_flags else "high",
+            "review_flags": sorted(set(review_flags)),
+            "line_count": len(lines),
+            "hint": "如需更深度分析，请提供完整模块代码和目标工艺/综合约束。",
+        }
 
 
 class TimingConstraintSuggesterTool(BaseTool):
@@ -364,6 +464,7 @@ class TimingConstraintSuggesterTool(BaseTool):
         super().__init__()
         self.name = "timing_constraint_suggester"
         self.description = "时序约束建议工具（SDC）"
+        self.risk_level = "high"
         self.parameters = [
             ToolParameter(name="module_name", type="string", description="模块名", required=False),
             ToolParameter(name="clock_period_ns", type="number", description="时钟周期(ns)", required=False),
@@ -371,7 +472,7 @@ class TimingConstraintSuggesterTool(BaseTool):
             ToolParameter(name="query", type="string", description="原始用户问题", required=False),
         ]
 
-    async def execute(self, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
         query = str(kwargs.get("query", "")).strip()
         module_name = str(kwargs.get("module_name") or "user_module").strip() or "user_module"
 
@@ -385,6 +486,12 @@ class TimingConstraintSuggesterTool(BaseTool):
             clock_period_ns = 5.0
 
         io_description = str(kwargs.get("io_description") or query or "")
+        review_flags: list[str] = []
+        assumptions = [
+            "默认主时钟端口名为 clk。",
+            "默认复位端口 rst_n 是异步控制信号。",
+            "IO 延迟比例为经验模板，需结合板级/上级模块时序确认。",
+        ]
 
         sdc = f"""# ==================== 自动生成的SDC时序约束 ====================
 # 模块: {module_name}
@@ -403,13 +510,66 @@ set_clock_latency 0.1 [get_clocks sys_clk]
         if "input" in io_description.lower() or "in" in io_description.lower():
             sdc += f"set_input_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} [get_ports {{输入端口列表}}]\n"
             sdc += f"set_input_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} [get_ports {{输入端口列表}}]\n"
+        else:
+            review_flags.append("missing_input_delay_context")
 
         if "output" in io_description.lower() or "out" in io_description.lower():
             sdc += f"set_output_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} [get_ports {{输出端口列表}}]\n"
             sdc += f"set_output_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} [get_ports {{输出端口列表}}]\n"
+        else:
+            review_flags.append("missing_output_delay_context")
 
         sdc += "\n# 4. 其他常用约束（根据实际项目补充）\n"
         sdc += "set_false_path -from [get_ports rst_n]\n"
         sdc += "# set_multicycle_path -setup 2 -to [get_ports critical_output]\n"
 
-        return sdc
+        if module_name == "user_module":
+            review_flags.append("module_name_defaulted")
+        if clock_period_ns_raw is None and _extract_clock_period_from_text(query) is None:
+            review_flags.append("clock_period_defaulted")
+
+        return {
+            "summary": f"已生成 {module_name} 的 SDC 模板，时钟周期 {clock_period_ns} ns。",
+            "generated_sdc": sdc,
+            "assumptions": assumptions,
+            "evidence": [
+                {
+                    "type": "user_goal",
+                    "source": "user_input",
+                    "content": query or io_description,
+                }
+            ],
+            "confidence": "low" if review_flags else "medium",
+            "review_flags": sorted(set(review_flags)),
+        }
+
+
+def _extract_always_blocks(code: str) -> list[tuple[int, str, str]]:
+    lines = code.splitlines()
+    starts: list[int] = []
+    for idx, line in enumerate(lines):
+        if re.search(r"\balways(?:_comb|_ff)?\b", line):
+            starts.append(idx)
+
+    blocks: list[tuple[int, str, str]] = []
+    for pos, start in enumerate(starts):
+        end = starts[pos + 1] if pos + 1 < len(starts) else len(lines)
+        header = lines[start].strip()
+        body = "\n".join(lines[start:end])
+        blocks.append((start + 1, header, body))
+    return blocks
+
+
+def _extract_sensitivity(header: str) -> str:
+    match = re.search(r"@\s*\((.*?)\)", header or "")
+    return match.group(1).lower() if match else ""
+
+
+def _extract_clock_period_from_text(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*ns", (text or "").lower())
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None

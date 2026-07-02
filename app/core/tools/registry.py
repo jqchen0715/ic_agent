@@ -57,14 +57,114 @@ class ToolRegistry:
 
     async def invoke(self, name: str, arguments: dict[str, Any]) -> str:
         """统一执行工具并转为字符串结果，便于注入 LLM 上下文。"""
-        tool = self.get_tool(name)
-        result = await tool.execute(**(arguments or {}))
+        record = await self.invoke_with_audit(name, arguments)
+        return str(record.get("result", ""))
 
+    async def invoke_with_audit(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """执行工具并返回可审计记录，供强自主 Agent 判定可靠性。"""
+        tool = self.get_tool(name)
+        safe_arguments = tool.validate_arguments(arguments or {})
+        result = await tool.execute(**safe_arguments)
+        return self._build_audit_record(tool, safe_arguments, result)
+
+    def _build_audit_record(
+        self,
+        tool: BaseTool,
+        arguments: dict[str, Any],
+        result: Any,
+    ) -> dict[str, Any]:
+        evidence = self._extract_evidence(result)
+        review_flags = self._extract_review_flags(result)
+        confidence = self._extract_confidence(result, evidence, review_flags)
+        summary = self._extract_summary(result)
+        serialized = self._serialize_result(result)
+        ok = not review_flags or not any(str(flag).startswith("tool_error") for flag in review_flags)
+        return {
+            "tool": tool.name,
+            "arguments": arguments,
+            "result": serialized,
+            "raw_result": result,
+            "ok": ok,
+            "summary": summary,
+            "evidence": evidence,
+            "confidence": confidence,
+            "review_flags": review_flags,
+            "risk_level": getattr(tool, "risk_level", "medium"),
+        }
+
+    def _serialize_result(self, result: Any) -> str:
         if isinstance(result, str):
             return result
         if isinstance(result, (dict, list, tuple)):
             return json.dumps(result, ensure_ascii=False)
         return str(result)
+
+    def _extract_summary(self, result: Any, max_len: int = 360) -> str:
+        if isinstance(result, dict):
+            for key in ("summary", "reason", "generated_sdc"):
+                value = result.get(key)
+                if value:
+                    text = " ".join(str(value).split())
+                    return text[:max_len] + ("..." if len(text) > max_len else "")
+            if isinstance(result.get("findings"), list):
+                findings = [str(item.get("message", "")) for item in result["findings"] if isinstance(item, dict)]
+                if findings:
+                    text = "；".join(findings)
+                    return text[:max_len] + ("..." if len(text) > max_len else "")
+        text = " ".join(self._serialize_result(result).split())
+        return text[:max_len] + ("..." if len(text) > max_len else "")
+
+    def _extract_evidence(self, result: Any) -> list[dict[str, Any]]:
+        if not isinstance(result, dict):
+            return []
+
+        explicit = result.get("evidence")
+        if isinstance(explicit, list):
+            return [item for item in explicit if isinstance(item, dict)]
+
+        rag_results = result.get("results")
+        if isinstance(rag_results, list):
+            evidence: list[dict[str, Any]] = []
+            for item in rag_results:
+                if not isinstance(item, dict):
+                    continue
+                evidence.append(
+                    {
+                        "type": "retrieval",
+                        "source": item.get("source", ""),
+                        "page": item.get("page", "页码未知"),
+                        "chunk_id": item.get("chunk_id", ""),
+                        "score": item.get("score", 0.0),
+                        "content": item.get("content", ""),
+                    }
+                )
+            return evidence
+
+        return []
+
+    def _extract_review_flags(self, result: Any) -> list[str]:
+        if not isinstance(result, dict):
+            return []
+        flags = result.get("review_flags")
+        if isinstance(flags, list):
+            return [str(item) for item in flags if str(item).strip()]
+        return []
+
+    def _extract_confidence(
+        self,
+        result: Any,
+        evidence: list[dict[str, Any]],
+        review_flags: list[str],
+    ) -> str:
+        if isinstance(result, dict):
+            confidence = str(result.get("confidence", "")).lower()
+            if confidence in {"high", "medium", "low", "unknown"}:
+                return confidence
+        if review_flags:
+            return "low"
+        if evidence:
+            return "high" if len(evidence) >= 2 else "medium"
+        return "unknown"
 
     def get_tools_description(self) -> str:
         """生成所有工具的自然语言描述（用于 System Prompt）。"""

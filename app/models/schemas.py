@@ -31,6 +31,10 @@ class ChatResponse(BaseModel):
     """非流式对话响应。"""
 
     id: str = Field(description="响应 ID")
+    conversation_id: str | None = Field(
+        default=None,
+        description="会话 ID，用于后续请求延续记忆",
+    )
     model: str = Field(description="实际使用的模型")
     answer: str = Field(description="助手回复正文（最终口径）")
     content: str | None = Field(default=None, description="兼容字段，等同 answer")
@@ -38,6 +42,59 @@ class ChatResponse(BaseModel):
     usage: dict[str, Any] | None = Field(default=None, description="Token 用量")
     sources: list[ICRetrievalResult] = Field(default_factory=list, description="答案引用来源")
     tool_events: list[dict[str, Any]] = Field(default_factory=list, description="工具调用事件列表")
+
+
+class AutonomousTaskRequest(BaseModel):
+    """自主 Agent 任务请求。"""
+
+    goal: str = Field(min_length=1, description="用户希望 Agent 自主完成的目标")
+    conversation_id: str | None = Field(default=None, description="会话 ID，用于任务记忆")
+    model: str | None = Field(default=None, description="优先使用的模型 ID")
+    max_steps: int = Field(default=6, ge=1, le=10, description="最多执行步骤数")
+
+
+class AutonomousTaskStep(BaseModel):
+    """自主 Agent 任务步骤。"""
+
+    id: str
+    title: str
+    description: str = ""
+    action_type: str = "reasoning"
+    tool_name: str | None = None
+    status: str = "pending"
+    rationale: str | None = Field(default=None, description="执行该步骤/工具的原因")
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    observation: str | None = None
+    evidence: list[dict[str, Any]] = Field(default_factory=list, description="工具返回的可审计证据")
+    confidence: str = Field(default="unknown", description="high | medium | low | unknown")
+    review_flags: list[str] = Field(default_factory=list, description="需要人工复核的原因")
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class AutonomousTask(BaseModel):
+    """自主 Agent 任务结果。"""
+
+    id: str
+    session_id: str
+    goal: str
+    status: str
+    created_at: str
+    updated_at: str
+    steps: list[AutonomousTaskStep] = Field(default_factory=list)
+    final_answer: str | None = None
+    reflection: dict[str, Any] = Field(default_factory=dict)
+    audit_summary: dict[str, Any] = Field(default_factory=dict, description="任务级审计摘要")
+    review_flags: list[str] = Field(default_factory=list, description="任务级人工复核原因")
+    confidence: str = Field(default="unknown", description="任务级置信度")
+    error: str | None = None
+
+
+class AutonomousTaskListResponse(BaseModel):
+    """自主 Agent 任务列表响应。"""
+
+    tasks: list[AutonomousTask] = Field(default_factory=list)
 
 
 class DocumentUploadResponse(BaseModel):

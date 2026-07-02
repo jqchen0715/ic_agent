@@ -60,6 +60,28 @@ class Settings(BaseSettings):
     )
     rag_reranker_device: str | None = Field(default=None, description="CrossEncoder 运行设备")
 
+    memory_enabled: bool = Field(default=True, description="是否启用会话记忆")
+    memory_backend: str = Field(default="local", description="记忆后端: local 或 milvus")
+    memory_store_path: str = Field(default="data/memory", description="本地记忆持久化目录")
+    memory_milvus_collection_name: str = Field(
+        default="agent_memory",
+        description="Milvus 长期记忆集合名",
+    )
+    memory_embedding_model_path: str = Field(
+        default="BAAI/bge-m3",
+        description="长期记忆嵌入模型路径或 HuggingFace 名称",
+    )
+    memory_embedding_device: str | None = Field(
+        default="cpu",
+        description="长期记忆嵌入设备",
+    )
+    memory_window_size: int = Field(default=20, description="短期记忆保留消息条数")
+    memory_recall_top_k: int = Field(default=5, description="长期记忆召回条数")
+    memory_remember_assistant: bool = Field(
+        default=False,
+        description="是否将助手回复写入长期记忆",
+    )
+
     log_level: str = Field(default="INFO", description="日志级别")
 
 

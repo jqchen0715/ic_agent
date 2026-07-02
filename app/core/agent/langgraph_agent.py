@@ -26,6 +26,9 @@ class _ToolRegistryLike(Protocol):
     async def invoke(self, name: str, arguments: dict[str, Any]) -> str:
         ...
 
+    async def invoke_with_audit(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        ...
+
 
 class _ModelRouterLike(Protocol):
     async def chat(
@@ -255,12 +258,14 @@ class LangGraphICAgent:
         q = (query or "").lower()
         domain_terms = (
             "verilog", "hdl", "rtl", "asic", "fpga", "sdc", "eda", "vlsi",
+            "setup", "hold", "timing", "slack", "sta", "cdc", "violation",
             "module", "endmodule", "always", "assign", "initial", "wire", "reg",
             "fork", "join", "defparam", "parameter", "udp", "wait", "$display", "$time",
             "$stime", "$realtime", "$countdrivers", "posedge", "negedge",
             "综合", "仿真", "时序", "电路", "芯片", "寄存器", "触发器", "门级",
             "模块", "实例", "端口", "信号", "注释", "参数", "复位", "时钟", "单元库",
             "元件", "阻塞", "非阻塞", "硬件描述", "分级名字", "向上引用",
+            "违例", "裕量", "关键路径", "建立时间", "保持时间",
         )
         return any(term in q or term in query for term in domain_terms)
 
@@ -273,8 +278,20 @@ class LangGraphICAgent:
         for tool_name in selected_tools:
             args = self._build_tool_args(tool_name, query, state.get("messages") or [])
             try:
-                result = await self._tools.invoke(tool_name, args)
-                outputs.append({"tool": tool_name, "arguments": args, "result": result, "ok": True})
+                audit = await self._invoke_tool_with_audit(tool_name, args)
+                result = str(audit.get("result", ""))
+                outputs.append(
+                    {
+                        "tool": tool_name,
+                        "arguments": audit.get("arguments", args),
+                        "result": result,
+                        "ok": bool(audit.get("ok", True)),
+                        "summary": audit.get("summary", ""),
+                        "evidence": audit.get("evidence", []),
+                        "confidence": audit.get("confidence", "unknown"),
+                        "review_flags": audit.get("review_flags", []),
+                    }
+                )
                 if not strict_miss_marker:
                     marker = self._build_strict_miss_marker(tool_name, result)
                     if marker:
@@ -292,6 +309,23 @@ class LangGraphICAgent:
         if strict_miss_marker:
             return {"tool_outputs": outputs, "strict_miss_marker": strict_miss_marker}
         return {"tool_outputs": outputs}
+
+    async def _invoke_tool_with_audit(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        invoke_with_audit = getattr(self._tools, "invoke_with_audit", None)
+        if callable(invoke_with_audit):
+            return await invoke_with_audit(tool_name, args)
+
+        result = await self._tools.invoke(tool_name, args)
+        return {
+            "tool": tool_name,
+            "arguments": args,
+            "result": result,
+            "ok": True,
+            "summary": str(result)[:360],
+            "evidence": [],
+            "confidence": "unknown",
+            "review_flags": ["legacy_tool_without_audit"],
+        }
 
     async def _answer_generator(self, state: AgentState) -> AgentState:
         if state.get("needs_clarification"):
@@ -384,10 +418,42 @@ class LangGraphICAgent:
         return len(terms) <= 1 and len(compact) <= 8
 
     def _extract_user_query(self, messages: list[dict[str, Any]]) -> str:
-        for item in reversed(messages or []):
-            if str(item.get("role", "")).lower() == "user":
-                return str(item.get("content", "")).strip()
-        return str(messages[-1].get("content", "")).strip() if messages else ""
+        user_messages = [
+            str(item.get("content", "")).strip()
+            for item in messages or []
+            if str(item.get("role", "")).lower() == "user" and str(item.get("content", "")).strip()
+        ]
+        if not user_messages:
+            return str(messages[-1].get("content", "")).strip() if messages else ""
+
+        current = user_messages[-1]
+        previous = user_messages[-2] if len(user_messages) >= 2 else ""
+        if previous and self._needs_contextual_query(current):
+            return f"上文用户问题: {previous}\n当前追问: {current}"
+        return current
+
+    def _needs_contextual_query(self, query: str) -> bool:
+        compact = re.sub(r"\s+", "", query or "").lower()
+        if not compact:
+            return False
+        followup_markers = (
+            "继续",
+            "详细",
+            "展开",
+            "为什么",
+            "怎么做",
+            "如何做",
+            "它",
+            "这个",
+            "上述",
+            "前面",
+            "再讲",
+            "more",
+            "continue",
+            "why",
+            "how",
+        )
+        return len(compact) <= 20 and any(marker in compact for marker in followup_markers)
 
     def _build_tool_args(
         self,

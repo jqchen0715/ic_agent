@@ -113,7 +113,7 @@ class ReflectionAgent:
             raw = await self._llm.acomplete(messages, temperature=0.1)
             data = _extract_json(raw)
         except Exception as e:  # noqa: BLE001
-            logger.exception("反思模型调用或解析失败")
+            logger.warning("反思模型调用或解析失败，已降级为保守评分: %s", e)
             return ReflectionReport(
                 quality_score=50,
                 is_complete=False,
