@@ -17,7 +17,7 @@
   当前版本的关键词：
 
   - 前端：`app/static` 提供可直接打开的 Web UI，包含聊天、工具/来源、自主任务面板。
-  - 记忆：`app/core/memory` 提供本地 JSONL 记忆，支持 Milvus 长期向量记忆。
+  - 记忆：`app/core/memory` 默认提供 JSONL 短期历史 + JSONL 长期关键词召回，Milvus 只作为长期记忆可选增强。
   - 自主：`app/core/agent/autonomous.py` 支持计划、执行、恢复、反思和审计。
   - 可靠：工具调用有参数校验，工具结果统一输出 evidence/confidence/review_flags。
 
@@ -26,7 +26,7 @@
   1. app/main.py:15
      掌握 FastAPI 启动生命周期、数据库 engine 初始化、API 路由挂载、静态前端挂载。
   2. app/config.py:9
-     掌握所有运行配置：模型、数据库、Chroma、embedding、reranker、data 路径、记忆后端、Milvus 记忆配置。
+     掌握所有运行配置：模型、数据库、Chroma、embedding、reranker、data 路径、JSONL 记忆路径、可选 Milvus 长期记忆配置。
   3. app/api/routes/chat.py:50
      普通问答最核心入口。必须讲清楚非流式 /chat 和 SSE /chat/stream 怎么读取记忆、构造模型路由器、工具注册表、
      Agent、trace、引用重写，并在结束时保存记忆。
@@ -41,8 +41,8 @@
   6. app/core/tools/base.py、app/core/tools/registry.py、app/core/tools/builtin/ic_tools.py
      掌握工具 schema 校验、invoke_with_audit 审计归一化，以及三个 IC 工具：
      ic_rag_search、verilog_code_analyzer、timing_constraint_suggester。
-  7. app/core/memory/factory.py、app/core/memory/local.py、app/core/memory/milvus.py、app/core/memory/manager.py
-     掌握短期历史、长期召回、本地 JSONL 记忆和 Milvus 向量记忆的切换逻辑。
+  7. app/core/memory/factory.py、app/core/memory/short_term.py、app/core/memory/long_term.py、app/core/memory/manager.py
+     掌握 JSONL 短期历史、JSONL 长期关键词召回，以及 Milvus 作为可选长期记忆增强的切换逻辑。
   8. app/static/index.html、app/static/app.js、app/static/styles.css
      掌握前端如何调用流式 chat、自主任务 API，以及如何展示工具调用、来源、置信度和复核标记。
   9. app/core/rag/retriever.py:97
@@ -79,11 +79,11 @@
   2. 再读 chat.py -> langgraph_agent.py，掌握普通问答主链路。
   3. 然后读 tools/base.py -> tools/registry.py -> ic_tools.py，掌握工具校验和审计。
   4. 接着读 autonomous.py -> agent.py，掌握强自主 Agent。
-  5. 再读 memory/*，掌握短期/长期记忆和 Milvus 切换。
+  5. 再读 memory/*，掌握短期 JSONL、长期 JSONL 关键词召回和可选 Milvus 长期记忆。
   6. 最后补 retriever.py -> citation_rewriter.py -> document.py -> etl/* -> evaluation/*。
 > 目标：把这个项目从“能跑起来”升级为“能讲清楚、能改代码、能应对实习面试追问”的工程资产。
 
-本项目是一个面向集成电路（IC）领域的专业 AI Agent 服务，核心能力是：用户通过 HTTP、SSE 或 Web 前端发起 IC 问答/自主任务请求，系统通过 LangGraph 和 AutonomousAgent 编排工具调用，结合 RAG 检索、Verilog 代码分析、时序约束建议、会话记忆、Milvus 长期记忆、工具审计和服务端引用治理，输出可追溯、可复核、低幻觉的专业回答或任务交付。
+本项目是一个面向集成电路（IC）领域的专业 AI Agent 服务，核心能力是：用户通过 HTTP、SSE 或 Web 前端发起 IC 问答/自主任务请求，系统通过 LangGraph 和 AutonomousAgent 编排工具调用，结合 RAG 检索、Verilog 代码分析、时序约束建议、JSONL 会话记忆、可选 Milvus 长期记忆、工具审计和服务端引用治理，输出可追溯、可复核、低幻觉的专业回答或任务交付。
 
 ---
 
@@ -105,7 +105,7 @@
 
 面试 1 分钟表达：
 
-> 我做的是一个面向集成电路领域的 AI Agent 服务。用户通过 FastAPI 的 `/chat` 或 `/chat/stream` 提问后，系统会先读取会话记忆，再进入 LangGraph 主链路，由 `pre_tool_router` 判断问题类型，比如普通 IC 知识、Verilog 代码、时序约束，然后调用对应工具。知识类问题会走 LlamaIndex + Chroma 的 RAG 检索，Verilog 问题可以走规则型代码分析，时序问题可以生成 SDC 约束建议。最终回答由大模型基于工具结果生成，并且服务端会重写引用，只允许展示本轮真实检索到的 source/page。除此之外，我还加了 `/agent/run` 强自主 Agent，可以对目标自动规划、执行工具、失败恢复、反思审查，并把 evidence、confidence、review_flags 返回给前端。项目还有本地/Milvus 记忆、Web UI、ETL 建库、IC 定制分块、CrossEncoder 重排和 RAGAS 评测脚本，形成从数据、检索、生成、自主执行到评测的完整闭环。
+> 我做的是一个面向集成电路领域的 AI Agent 服务。用户通过 FastAPI 的 `/chat` 或 `/chat/stream` 提问后，系统会先读取会话记忆，再进入 LangGraph 主链路，由 `pre_tool_router` 判断问题类型，比如普通 IC 知识、Verilog 代码、时序约束，然后调用对应工具。知识类问题会走 LlamaIndex + Chroma 的 RAG 检索，Verilog 问题可以走规则型代码分析，时序问题可以生成 SDC 约束建议。最终回答由大模型基于工具结果生成，并且服务端会重写引用，只允许展示本轮真实检索到的 source/page。除此之外，我还加了 `/agent/run` 强自主 Agent，可以对目标自动规划、执行工具、失败恢复、反思审查，并把 evidence、confidence、review_flags 返回给前端。项目还有 JSONL 短期历史、JSONL 长期关键词召回、可选 Milvus 长期记忆、Web UI、ETL 建库、IC 定制分块、CrossEncoder 重排和 RAGAS 评测脚本，形成从数据、检索、生成、自主执行到评测的完整闭环。
 ``` text
 etl建库:ETL 建库就是：把原始文档变成可以被 RAG 检索的知识库。
 ETL 是三个词：
@@ -630,14 +630,17 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
 - 写入或读取 Chroma。
 - 检索 top-k 文档。
 - 返回带 source/page/chunk_id 的结构化结果。
-- 管理本地 JSONL 会话记忆。
-- 可选使用 Milvus 保存长期向量记忆。
+- 管理 JSONL 短期会话历史。
+- 管理 JSONL 长期记忆，并用简单关键词重叠召回。
+- 可选使用 Milvus 替换长期记忆召回。
 
 关键文件：
 
 - `app/core/rag/retriever.py`
 - `app/core/rag/reranker.py`
 - `app/core/rag/citation_rewriter.py`
+- `app/core/memory/short_term.py`
+- `app/core/memory/long_term.py`
 - `app/core/memory/local.py`
 - `app/core/memory/milvus.py`
 - `app/core/memory/manager.py`
@@ -1669,6 +1672,8 @@ groundtruth 就是标准答案 / 标注答案 / 参考真值。
 关键文件：
 
 - `app/core/memory/manager.py`
+- `app/core/memory/short_term.py`
+- `app/core/memory/long_term.py`
 - `app/core/memory/local.py`
 - `app/core/memory/milvus.py`
 - `app/core/memory/factory.py`
@@ -1685,21 +1690,30 @@ groundtruth 就是标准答案 / 标注答案 / 参考真值。
 
 #### 当前实现
 
-默认后端是本地 JSONL：
+默认实现是本地 JSONL，分成两层：
+
+- `ShortTermMemory`：写入 `data/memory/short_term/*.jsonl`，读取最近 `MEMORY_WINDOW_SIZE` 条消息。
+- `LongTermMemory`：写入 `data/memory/long_term/*.jsonl`，按当前 query 和记忆内容的关键词重叠召回 `MEMORY_RECALL_TOP_K` 条。
+
+配置：
 
 ```text
 MEMORY_ENABLED=true
 MEMORY_BACKEND=local
 MEMORY_STORE_PATH=data/memory
+MEMORY_WINDOW_SIZE=20
+MEMORY_RECALL_TOP_K=5
 ```
 
-切换 Milvus：
+可选切换 Milvus 长期记忆：
 
 ```text
 MEMORY_BACKEND=milvus
 MEMORY_MILVUS_COLLECTION_NAME=agent_memory
 MEMORY_EMBEDDING_MODEL_PATH=BAAI/bge-m3
 ```
+
+注意：`MEMORY_BACKEND=milvus` 只替换长期记忆实现；短期记忆仍然固定使用 JSONL。Milvus 不可用时会回退到 JSONL 长期记忆。
 
 核心流程：
 
@@ -1715,7 +1729,7 @@ chat request
 
 #### 面试怎么讲
 
-> 我把记忆拆成短期历史和长期召回。短期历史解决多轮对话连续性，长期召回解决同一会话里重要信息复用。默认用本地 JSONL，方便开发演示；如果配置 `MEMORY_BACKEND=milvus`，长期记忆会向量化写入 Milvus，并在 Milvus 不可用时回退本地存储。
+> 我把记忆拆成短期历史和长期召回。短期历史用 JSONL 保存同一 `conversation_id` 下最近多轮 user/assistant 消息，解决“继续展开”“那 hold 呢？”这类追问；长期记忆也默认用 JSONL 保存关键内容，并通过简单关键词重叠召回，保证本地演示不依赖额外服务。如果配置 `MEMORY_BACKEND=milvus`，只把长期记忆替换成 Milvus 向量召回，短期记忆仍然保持 JSONL。这个取舍适合实习项目：主链路简单可靠，增强能力也有扩展口。
 
 ---
 
@@ -2109,7 +2123,7 @@ function calling 是大模型的一种工具调用机制：
 
 ---
 
-### 亮点七：会话记忆与 Milvus 长期记忆
+### 亮点七：JSONL 会话记忆与可选 Milvus 长期记忆
 
 #### 技术本质
 
@@ -2117,11 +2131,11 @@ function calling 是大模型的一种工具调用机制：
 
 #### 简历写法
 
-> 设计 Agent 记忆系统，支持本地 JSONL 短期历史与长期召回，并可切换 Milvus 向量记忆，实现基于 `conversation_id` 的多轮上下文复用。
+> 设计 Agent 记忆系统，默认支持 JSONL 短期历史窗口和 JSONL 长期关键词召回，并可选切换 Milvus 长期向量召回，实现基于 `conversation_id` 的多轮上下文复用。
 
 #### 面试怎么讲
 
-> 我把记忆拆成两层。短期记忆保存最近多轮消息，解决用户追问时上下文丢失；长期记忆把重要内容写入可召回存储。开发环境默认用本地 JSONL，便于调试和演示；如果设置 `MEMORY_BACKEND=milvus`，长期记忆会通过 embedding 写入 Milvus collection。这样项目不只是单轮问答，而是能围绕一个会话持续积累上下文。
+> 我把记忆拆成两层。短期记忆用 JSONL 保存最近多轮消息，解决用户追问时上下文丢失；长期记忆默认也用 JSONL 保存关键内容，并用简单关键词重叠召回，保证本地可跑、可演示。如果设置 `MEMORY_BACKEND=milvus`，只把长期记忆替换成 embedding + Milvus collection 的向量召回。这样项目不只是单轮问答，而是能围绕一个会话持续积累上下文，同时不会让基础版本依赖太多外部服务。
 
 #### 面试官可能追问
 
@@ -2424,7 +2438,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 新版补充：
 
-> 现在项目还加入了会话记忆、Milvus 长期记忆、Web UI 和强自主 Agent。强自主模式不是单轮回答，而是会自动规划、执行工具、失败恢复、反思审查，并返回 evidence、confidence 和 review_flags，所以更接近一个可审计的任务型 Agent。
+> 现在项目还加入了 JSONL 会话记忆、可选 Milvus 长期记忆、Web UI 和强自主 Agent。强自主模式不是单轮回答，而是会自动规划、执行工具、失败恢复、反思审查，并返回 evidence、confidence 和 review_flags，所以更接近一个可审计的任务型 Agent。
 
 ---
 
@@ -2533,7 +2547,8 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
         |
         v
 +-------+----------------------------------------------+
-| Memory: local JSONL short/long term, optional Milvus  |
+| Memory: JSONL short-term + JSONL keyword long-term    |
+|         optional Milvus long-term recall              |
 +------------------------------------------------------+
 ```
 
@@ -2552,7 +2567,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 7. `app/core/agent/autonomous.py`：理解计划、执行、恢复、反思和审计。
 8. `app/core/tools/base.py`、`app/core/tools/registry.py`：理解工具参数校验和审计归一化。
 9. `app/core/tools/builtin/ic_tools.py`：理解三个 IC 工具。
-10. `app/core/memory/manager.py`、`app/core/memory/local.py`、`app/core/memory/milvus.py`：理解记忆系统。
+10. `app/core/memory/manager.py`、`app/core/memory/short_term.py`、`app/core/memory/long_term.py`、`app/core/memory/milvus.py`：理解记忆系统。
 11. `app/core/rag/retriever.py`：理解 RAG 检索和索引维护。
 12. `app/etl/ic_text_splitter.py`：理解 IC 定制分块。
 13. `app/core/rag/citation_rewriter.py`：理解引用治理。
@@ -2565,7 +2580,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 如果面试官让你介绍项目，可以直接按这个模板说：
 
-> 我做的是一个面向集成电路领域的 AI Agent 服务，主要用于 IC 专业知识问答和工程辅助。系统后端用 FastAPI 提供 HTTP、SSE 和自主任务接口，前端提供一个轻量 Agent 工作台。普通问答链路用 LangGraph 编排，包括记忆读取、问题澄清、工具路由、工具执行和答案生成；知识类问题会调用 LlamaIndex + Chroma 的 RAG 检索链路，文档进入知识库前会经过 IC 定制分块，尽量保留 Verilog module、章节和时序图边界；Verilog 代码问题会调用规则型代码分析工具；时序问题会生成 SDC 约束建议。为了降低幻觉，我做了严格拒答、服务端引用重写和工具审计，最终引用只来自本轮真实检索到的 source/page，工具结果也会返回 evidence、confidence 和 review_flags。除此之外，项目支持本地/Milvus 记忆，并新增 `/agent/run` 强自主 Agent，可以对目标自动规划、执行、失败恢复、反思审查和输出 audit_summary。最后，项目用 RAGAS、自定义指标和新增测试覆盖 answer quality、citation correctness、refusal correctness、tool routing accuracy、记忆和工具审计，形成完整质量闭环。
+> 我做的是一个面向集成电路领域的 AI Agent 服务，主要用于 IC 专业知识问答和工程辅助。系统后端用 FastAPI 提供 HTTP、SSE 和自主任务接口，前端提供一个轻量 Agent 工作台。普通问答链路用 LangGraph 编排，包括记忆读取、问题澄清、工具路由、工具执行和答案生成；知识类问题会调用 LlamaIndex + Chroma 的 RAG 检索链路，文档进入知识库前会经过 IC 定制分块，尽量保留 Verilog module、章节和时序图边界；Verilog 代码问题会调用规则型代码分析工具；时序问题会生成 SDC 约束建议。为了降低幻觉，我做了严格拒答、服务端引用重写和工具审计，最终引用只来自本轮真实检索到的 source/page，工具结果也会返回 evidence、confidence 和 review_flags。除此之外，项目支持 JSONL 短期历史和 JSONL 长期关键词召回，并保留 Milvus 长期向量召回作为可选增强；同时新增 `/agent/run` 强自主 Agent，可以对目标自动规划、执行、失败恢复、反思审查和输出 audit_summary。最后，项目用 RAGAS、自定义指标和新增测试覆盖 answer quality、citation correctness、refusal correctness、tool routing accuracy、记忆和工具审计，形成完整质量闭环。
 
 ---
 

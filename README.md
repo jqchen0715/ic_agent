@@ -2,7 +2,7 @@
 
 面向集成电路问答与工程辅助的 Agent 项目。当前版本已经从“IC 知识问答服务”升级为：
 
-**FastAPI + LangGraph + RAG + IC Tools + Memory + Milvus + Web UI + Autonomous Agent + Reliability Audit**
+**FastAPI + LangGraph + RAG + IC Tools + JSONL Memory + Optional Milvus + Web UI + Autonomous Agent + Reliability Audit**
 
 详细运行与排障手册见：`MERGED_USAGE_MANUAL.md`
 
@@ -15,8 +15,8 @@
 - IC RAG 检索：基于 LlamaIndex + Chroma + embedding + reranker，返回 `source/page/chunk_id`。
 - 服务端引用治理：最终引用只允许来自本轮真实检索结果，移除模型自造引用。
 - IC 工具调用：内置 `ic_rag_search`、`verilog_code_analyzer`、`timing_constraint_suggester`。
-- 记忆系统：默认本地 JSONL 记忆，支持短期上下文和长期召回。
-- Milvus 长期记忆：设置 `MEMORY_BACKEND=milvus` 后使用 Milvus collection 存储向量记忆。
+- 记忆系统：默认短期 JSONL 历史窗口 + 长期 JSONL 关键词召回，支持 `conversation_id` 多轮上下文复用。
+- 可选 Milvus 长期记忆：设置 `MEMORY_BACKEND=milvus` 后，仅将长期记忆替换为 Milvus 向量召回。
 - 强自主 Agent：`/api/v1/agent/run` 支持计划、执行、失败恢复、反思、审计和最终交付。
 - 可靠性审计：工具结果统一带 `evidence`、`confidence`、`review_flags`、`summary`。
 - Web 前端：访问 `/` 即可使用聊天、工具/来源展示、会话记忆和自主任务面板。
@@ -149,7 +149,7 @@ goal
 - 自主 Agent 遇到工具失败会降级恢复，但任务状态会变成 `needs_review`，不会伪装成完成。
 - 反思模型不可用时会降级为保守评分。
 
-## 记忆与 Milvus
+## 记忆系统
 
 默认本地记忆：
 
@@ -161,8 +161,11 @@ MEMORY_WINDOW_SIZE=20
 MEMORY_RECALL_TOP_K=5
 ```
 
-默认情况下，短期记忆使用 JSONL 保存最近多轮消息，长期记忆使用 JSONL + 简单关键词召回。
-`MEMORY_BACKEND=milvus` 只把长期记忆替换成 Milvus 向量召回，短期记忆仍保持 JSONL。
+默认情况下：
+
+- `ShortTermMemory`：使用 JSONL 保存最近多轮 user/assistant 消息。
+- `LongTermMemory`：使用 JSONL 保存长期条目，并通过简单关键词重叠召回。
+- `MEMORY_BACKEND=milvus` 只把长期记忆替换成 Milvus 向量召回，短期记忆仍保持 JSONL。
 
 Milvus 长期记忆：
 
@@ -173,7 +176,7 @@ MEMORY_EMBEDDING_MODEL_PATH=BAAI/bge-m3
 MEMORY_EMBEDDING_DEVICE=cpu
 ```
 
-Milvus 不可用时，系统会回退到本地 JSONL 记忆。
+Milvus 不可用时，长期记忆会回退到本地 JSONL 关键词召回。
 
 ## 模块职责
 
@@ -182,7 +185,7 @@ Milvus 不可用时，系统会回退到本地 JSONL 记忆。
 - `app/api/routes/agent.py`：强自主 Agent 任务入口。
 - `app/core/agent/langgraph_agent.py`：普通问答 Agent 状态图。
 - `app/core/agent/autonomous.py`：强自主 Agent 计划、执行、恢复、反思和审计。
-- `app/core/memory`：本地记忆、Milvus 记忆和记忆管理器。
+- `app/core/memory`：JSONL 短期记忆、JSONL 长期关键词召回、可选 Milvus 长期记忆和记忆管理器。
 - `app/core/rag`：IC RAG 检索、rerank 和引用治理。
 - `app/core/tools`：工具注册、参数校验、审计归一化和 IC 工具实现。
 - `app/static`：无构建前端页面、样式和交互逻辑。
