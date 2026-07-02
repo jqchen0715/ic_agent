@@ -8,11 +8,11 @@ from typing import Any
 
 from loguru import logger
 
-from app.core.memory.long_term import LongTermMemory
+from app.core.memory.long_term import MilvusLongTermMemory
 
 try:
     from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, connections, utility
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     Collection = None  # type: ignore[assignment]
     CollectionSchema = None  # type: ignore[assignment]
     DataType = None  # type: ignore[assignment]
@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 
 
 class SentenceTransformerMemoryEmbedder:
-    """适配 LongTermMemory 的 sentence-transformers 嵌入器。"""
+    """适配 MilvusLongTermMemory 的 sentence-transformers 嵌入器。"""
 
     def __init__(self, model_name: str, *, device: str | None = None) -> None:
         model_path = Path(model_name)
@@ -66,8 +66,8 @@ def build_milvus_long_term_memory(
     user: str = "",
     password: str = "",
     alias: str = "memory",
-) -> LongTermMemory:
-    """连接 Milvus，确保记忆集合存在，并返回 LongTermMemory。"""
+) -> MilvusLongTermMemory:
+    """连接 Milvus，确保记忆集合存在，并返回 MilvusLongTermMemory。"""
     if Collection is None or connections is None or utility is None:
         raise RuntimeError("未安装 pymilvus，无法启用 Milvus 记忆")
 
@@ -99,34 +99,34 @@ def build_milvus_long_term_memory(
     except Exception as exc:  # pragma: no cover - Milvus 状态相关
         logger.warning("Milvus 记忆集合 load 失败，将在检索时重试: {}", exc)
 
-    return LongTermMemory(collection, embedder)
+    return MilvusLongTermMemory(collection, embedder)
 
 
 def _create_memory_collection(collection_name: str, dim: int, alias: str) -> None:
     fields = [
         FieldSchema(
-            name=LongTermMemory.pk_field,
+            name=MilvusLongTermMemory.pk_field,
             dtype=DataType.VARCHAR,
             is_primary=True,
             max_length=64,
         ),
         FieldSchema(
-            name=LongTermMemory.vector_field,
+            name=MilvusLongTermMemory.vector_field,
             dtype=DataType.FLOAT_VECTOR,
             dim=dim,
         ),
         FieldSchema(
-            name=LongTermMemory.content_field,
+            name=MilvusLongTermMemory.content_field,
             dtype=DataType.VARCHAR,
             max_length=65535,
         ),
         FieldSchema(
-            name=LongTermMemory.session_field,
+            name=MilvusLongTermMemory.session_field,
             dtype=DataType.VARCHAR,
             max_length=256,
         ),
         FieldSchema(
-            name=LongTermMemory.meta_field,
+            name=MilvusLongTermMemory.meta_field,
             dtype=DataType.VARCHAR,
             max_length=65535,
         ),
@@ -152,7 +152,7 @@ def _ensure_memory_index(collection: Any) -> None:
         "params": {"nlist": 128},
     }
     collection.create_index(
-        field_name=LongTermMemory.vector_field,
+        field_name=MilvusLongTermMemory.vector_field,
         index_params=index_params,
     )
     logger.info("已创建 Milvus 记忆向量索引 collection={}", collection.name)

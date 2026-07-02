@@ -39,8 +39,8 @@ class MemoryManager:
         remember_assistant: bool = False,
     ) -> None:
         """
-        :param short_term: 短期记忆实现（Redis + 窗口）
-        :param long_term: 长期记忆实现（向量库）
+        :param short_term: 短期记忆实现（默认 JSONL 历史窗口）
+        :param long_term: 长期记忆实现（默认 JSONL 关键词召回）
         """
         self._stm = short_term
         self._ltm = long_term
@@ -68,7 +68,7 @@ class MemoryManager:
         )
 
     async def save(self, session_id: str, message: Message) -> None:
-        """将新消息写入短期记忆（滑动窗口与压缩由 ShortTermMemory 负责）。"""
+        """将新消息写入短期记忆（窗口裁剪由 ShortTermMemory 读取时负责）。"""
         try:
             await self._stm.add_message(session_id, message)
         except Exception as e:

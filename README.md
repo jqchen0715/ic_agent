@@ -161,6 +161,9 @@ MEMORY_WINDOW_SIZE=20
 MEMORY_RECALL_TOP_K=5
 ```
 
+默认情况下，短期记忆使用 JSONL 保存最近多轮消息，长期记忆使用 JSONL + 简单关键词召回。
+`MEMORY_BACKEND=milvus` 只把长期记忆替换成 Milvus 向量召回，短期记忆仍保持 JSONL。
+
 Milvus 长期记忆：
 
 ```env

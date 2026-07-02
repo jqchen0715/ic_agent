@@ -20,12 +20,9 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="监听地址")
     port: int = Field(default=8000, description="监听端口")
 
-    openai_api_key: str = Field(default="sk-61c81f473bae450f940fc6d1b48627be", description="OpenAI API Key")
-    openai_api_base: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        description="OpenAI 兼容 API Base",
-    )
-    openai_model: str = Field(default="qwen-turbo-2025-02-11", description="默认对话模型")
+    openai_api_key: str = Field(description="OpenAI API Key")
+    openai_api_base: str = Field(description="OpenAI 兼容 API Base")
+    openai_model: str = Field(description="默认对话模型")
 
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@localhost:5432/agent_db",
@@ -61,7 +58,7 @@ class Settings(BaseSettings):
     rag_reranker_device: str | None = Field(default=None, description="CrossEncoder 运行设备")
 
     memory_enabled: bool = Field(default=True, description="是否启用会话记忆")
-    memory_backend: str = Field(default="local", description="记忆后端: local 或 milvus")
+    memory_backend: str = Field(default="local", description="长期记忆后端: local 或 milvus")
     memory_store_path: str = Field(default="data/memory", description="本地记忆持久化目录")
     memory_milvus_collection_name: str = Field(
         default="agent_memory",
