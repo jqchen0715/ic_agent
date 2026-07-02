@@ -1,32 +1,56 @@
 # IC-Expert Agent 项目掌握手册
 这个项目的主线可以这样记：
 
-  /api/v1/chat -> 构造 LangGraphICAgent -> pre_tool_router 选工具 -> tool_executor 调 IC 工具/RAG ->
-  answer_generator 基于工具结果生成回答 -> rewrite_answer_citations 服务端重写引用 -> 返回 ChatResponse。
+  普通问答链路：
+
+  /api/v1/chat 或 /api/v1/chat/stream -> 读取会话记忆 -> 构造 LangGraphICAgent ->
+  pre_tool_router 选工具 -> tool_executor 调 IC 工具/RAG -> 工具审计归一化 ->
+  answer_generator 基于工具结果生成回答 -> rewrite_answer_citations 服务端重写引用 ->
+  保存会话记忆 -> 返回 ChatResponse / SSE events。
+
+  强自主 Agent 链路：
+
+  /api/v1/agent/run -> AutonomousAgent -> plan 任务拆解 -> execute 工具/推理步骤 ->
+  收集 evidence/confidence/review_flags -> 工具失败时 recover -> finalize 最终交付 ->
+  reflect 反思审查 -> audit_summary 汇总 -> 保存任务记忆。
+
+  当前版本的关键词：
+
+  - 前端：`app/static` 提供可直接打开的 Web UI，包含聊天、工具/来源、自主任务面板。
+  - 记忆：`app/core/memory` 提供本地 JSONL 记忆，支持 Milvus 长期向量记忆。
+  - 自主：`app/core/agent/autonomous.py` 支持计划、执行、恢复、反思和审计。
+  - 可靠：工具调用有参数校验，工具结果统一输出 evidence/confidence/review_flags。
 
   P0 必看
 
   1. app/main.py:15
-     掌握 FastAPI 启动生命周期、数据库 engine 初始化、路由挂载。
+     掌握 FastAPI 启动生命周期、数据库 engine 初始化、API 路由挂载、静态前端挂载。
   2. app/config.py:9
-     掌握所有运行配置：模型、数据库、Chroma、embedding、reranker、data 路径。注意这里现在有默认 API key 风险，面
-     试/提交前应改成只从环境变量读。
+     掌握所有运行配置：模型、数据库、Chroma、embedding、reranker、data 路径、记忆后端、Milvus 记忆配置。
   3. app/api/routes/chat.py:50
-     最核心入口。必须讲清楚非流式 /chat 和 SSE /chat/stream 怎么构造模型路由器、工具注册表、Agent、trace、引用重
-     写。
+     普通问答最核心入口。必须讲清楚非流式 /chat 和 SSE /chat/stream 怎么读取记忆、构造模型路由器、工具注册表、
+     Agent、trace、引用重写，并在结束时保存记忆。
   4. app/core/agent/langgraph_agent.py:70
-     全项目最重要文件。重点掌握：
+     普通问答 Agent 的最重要文件。重点掌握：
      _build_graph、_pre_tool_router、_tool_executor、_answer_generator、严格拒答、source 提取。
      这是你面试里讲“Agent 编排”的主战场。
-  5. app/core/tools/builtin/ic_tools.py:213
-     掌握三个 IC 工具：ic_rag_search、verilog_code_analyzer、timing_constraint_suggester。其中 ic_rag_search 是
-     RAG 入口。
-  6. app/core/rag/retriever.py:97
+  5. app/core/agent/autonomous.py
+     强自主 Agent 主文件。重点掌握：
+     _plan、_heuristic_plan、_invoke_tool_with_audit、_recover、_finalize、_reflect、_build_audit_summary。
+     这是你讲“从问答机器人升级为强自主 Agent”的主战场。
+  6. app/core/tools/base.py、app/core/tools/registry.py、app/core/tools/builtin/ic_tools.py
+     掌握工具 schema 校验、invoke_with_audit 审计归一化，以及三个 IC 工具：
+     ic_rag_search、verilog_code_analyzer、timing_constraint_suggester。
+  7. app/core/memory/factory.py、app/core/memory/local.py、app/core/memory/milvus.py、app/core/memory/manager.py
+     掌握短期历史、长期召回、本地 JSONL 记忆和 Milvus 向量记忆的切换逻辑。
+  8. app/static/index.html、app/static/app.js、app/static/styles.css
+     掌握前端如何调用流式 chat、自主任务 API，以及如何展示工具调用、来源、置信度和复核标记。
+  9. app/core/rag/retriever.py:97
      掌握 LlamaIndex + Chroma + HuggingFace embedding + source 一致性检查 + reranker 的检索链路。重点看
      _ensure_index 和 retrieve。
-  7. app/core/rag/citation_rewriter.py:31
+  10. app/core/rag/citation_rewriter.py:31
      掌握“服务端引用治理”：移除模型自己编的参考资料，只保留本轮真实检索到的 source/page。这是项目亮点。
-  8. app/api/routes/document.py:56
+  11. app/api/routes/document.py:56
      掌握文档上传：保存文件、ETL 分块、写数据库、PDF 同步到 data/、重建 Chroma。
 
   P1 需要掌握
@@ -36,23 +60,30 @@
   2. app/infrastructure/llm/model_router.py:41、app/infrastructure/llm/circuit_breaker.py:24
      掌握模型路由、优先级、加权选择、失败降级、熔断器。
   3. app/models/schemas.py:20
-     掌握 API 请求响应结构，尤其 ChatRequest、ChatResponse、ICRetrievalResult。
+     掌握 API 请求响应结构，尤其 ChatRequest、ChatResponse、AutonomousTask、AutonomousTaskStep、ICRetrievalResult。
   4. app/infrastructure/database/models.py:23、app/infrastructure/database/session.py:36
      掌握 ORM 模型和异步 session。当前聊天主链路没有把对话消息落库，但文档上传会写 documents / document_chunks。
   5. evaluation/evaluate_ragas.py:238、evaluation/retrieval_smoke_test.py:85
      掌握项目质量闭环：RAGAS、引用正确率、拒答正确率、工具路由准确率、检索冒烟测试。
+  6. tests/test_memory.py、tests/test_tool_audit.py、tests/test_autonomous_agent_audit.py
+     掌握记忆、工具审计和自主 Agent 复核状态的回归测试思路。
 
   P2 了解即可
-  app/core/agent/react_agent.py、planner.py、orchestrator.py、reflection.py、memory/、cache/redis_cache.py、
-  vectordb/milvus_client.py。这些是通用 Agent/记忆/缓存/Milvus 能力储备，代码完整，但当前 /chat 主链路主要走
-  LangGraphICAgent，不是这些模块。
+  app/core/agent/react_agent.py、planner.py、orchestrator.py、cache/redis_cache.py、
+  vectordb/milvus_client.py。这些是通用 Agent/缓存/Milvus 能力储备，代码完整，但当前普通问答主链路主要走
+  LangGraphICAgent，强自主任务主链路走 AutonomousAgent。
 
-  学习顺序建议：先读 chat.py，再读 langgraph_agent.py，然后顺着工具读 ic_tools.py -> retriever.py ->
-  citation_rewriter.py，最后补 document.py -> etl/* -> evaluation/*。这条线掌握了，就能讲清楚这个项目的核心价值
-  和主要代码改造点。
+  学习顺序建议：
+
+  1. 先读 README.md 和 app/main.py，理解入口和路由挂载。
+  2. 再读 chat.py -> langgraph_agent.py，掌握普通问答主链路。
+  3. 然后读 tools/base.py -> tools/registry.py -> ic_tools.py，掌握工具校验和审计。
+  4. 接着读 autonomous.py -> agent.py，掌握强自主 Agent。
+  5. 再读 memory/*，掌握短期/长期记忆和 Milvus 切换。
+  6. 最后补 retriever.py -> citation_rewriter.py -> document.py -> etl/* -> evaluation/*。
 > 目标：把这个项目从“能跑起来”升级为“能讲清楚、能改代码、能应对实习面试追问”的工程资产。
 
-本项目是一个面向集成电路（IC）领域的专业 AI Agent 服务，核心能力是：用户通过 HTTP 或 SSE 发起 IC 问答请求，系统通过 LangGraph 编排工具调用，结合 RAG 检索、Verilog 代码分析、时序约束建议和服务端引用治理，输出可追溯、低幻觉的专业回答。
+本项目是一个面向集成电路（IC）领域的专业 AI Agent 服务，核心能力是：用户通过 HTTP、SSE 或 Web 前端发起 IC 问答/自主任务请求，系统通过 LangGraph 和 AutonomousAgent 编排工具调用，结合 RAG 检索、Verilog 代码分析、时序约束建议、会话记忆、Milvus 长期记忆、工具审计和服务端引用治理，输出可追溯、可复核、低幻觉的专业回答或任务交付。
 
 ---
 
@@ -62,17 +93,19 @@
 
 一句话：
 
-> 这个项目解决的是“IC 专业知识问答不可靠、缺少引用、不能调用领域工具”的问题，通过 Agent + RAG + IC 工具链，把普通大模型封装成一个面向集成电路学习和工程辅助的专业问答系统。
+> 这个项目解决的是“IC 专业知识问答不可靠、缺少引用、不能调用领域工具、不能持续记忆上下文、不能自主拆解任务”的问题，通过 Agent + RAG + IC 工具链 + 记忆系统 + 自主任务执行，把普通大模型封装成一个面向集成电路学习和工程辅助的专业 Agent 系统。
 
 业务视角：
 
 - 对学生：可以用它查询 Verilog、时序分析、乘法器优化、ASIC/FPGA 等 IC 知识，并看到资料来源。
 - 对工程场景：可以辅助检查 Verilog 代码、生成 SDC 时序约束建议、检索内部 IC 文档。
-- 对面试展示：它不是一个简单 ChatGPT wrapper，而是一个具备领域路由、工具调用、检索增强、引用治理和评测闭环的垂类 Agent 系统。
+- 对连续学习：可以通过 `conversation_id` 复用短期上下文和长期记忆，避免每轮都从零开始。
+- 对自主任务：可以输入一个目标，让 Agent 自动拆计划、调用工具、失败恢复、反思审查并给出最终交付。
+- 对面试展示：它不是一个简单 ChatGPT wrapper，而是一个具备领域路由、工具调用、检索增强、记忆、自主执行、引用治理、可靠性审计和评测闭环的垂类 Agent 系统。
 
 面试 1 分钟表达：
 
-> 我做的是一个面向集成电路领域的 AI Agent 服务。用户通过 FastAPI 的 `/chat` 或 `/chat/stream` 提问后，系统会进入 LangGraph 主链路，先由 `pre_tool_router` 判断问题类型，比如普通 IC 知识、Verilog 代码、时序约束，然后调用对应工具。知识类问题会走 LlamaIndex + Chroma 的 RAG 检索，Verilog 问题可以走规则型代码分析，时序问题可以生成 SDC 约束建议。最终回答由大模型基于工具结果生成，并且服务端会重写引用，只允许展示本轮真实检索到的 source/page，降低模型幻觉。项目还包含 ETL 建库、IC 定制分块、CrossEncoder 重排和 RAGAS 评测脚本，形成从数据、检索、生成到评测的完整闭环。
+> 我做的是一个面向集成电路领域的 AI Agent 服务。用户通过 FastAPI 的 `/chat` 或 `/chat/stream` 提问后，系统会先读取会话记忆，再进入 LangGraph 主链路，由 `pre_tool_router` 判断问题类型，比如普通 IC 知识、Verilog 代码、时序约束，然后调用对应工具。知识类问题会走 LlamaIndex + Chroma 的 RAG 检索，Verilog 问题可以走规则型代码分析，时序问题可以生成 SDC 约束建议。最终回答由大模型基于工具结果生成，并且服务端会重写引用，只允许展示本轮真实检索到的 source/page。除此之外，我还加了 `/agent/run` 强自主 Agent，可以对目标自动规划、执行工具、失败恢复、反思审查，并把 evidence、confidence、review_flags 返回给前端。项目还有本地/Milvus 记忆、Web UI、ETL 建库、IC 定制分块、CrossEncoder 重排和 RAGAS 评测脚本，形成从数据、检索、生成、自主执行到评测的完整闭环。
 ``` text
 etl建库:ETL 建库就是：把原始文档变成可以被 RAG 检索的知识库。
 ETL 是三个词：
@@ -447,41 +480,56 @@ RAG / 数据层
 
 #### 前端 / 客户端层
 
-项目本身没有复杂前端，主要通过：
+当前项目已经有内置 Web 前端，主要通过：
 
+- 浏览器访问 `/`
 - HTTP 非流式接口 `/api/v1/chat`
 - SSE 流式接口 `/api/v1/chat/stream`
-- curl / API client / future frontend 调用
+- 强自主任务接口 `/api/v1/agent/run`
+- curl / API client 调用
 
-HTTP 非流式接口 /api/v1/chat
-普通的 POST 接口，服务端一次性返回完整回答。适合简单调用或后端对接。
+Web 前端
+由 `app/static/index.html`、`app/static/app.js`、`app/static/styles.css` 组成，不需要 React/Vue 构建。页面包含：
 
-SSE 流式接口 /api/v1/chat/stream
-用 Server-Sent Events 持续推送响应，客户端可以边接收边显示（类似打字效果），还能逐步看到工具调用事件。
+- 普通聊天区。
+- 会话 ID 和记忆状态。
+- 工具调用面板。
+- 来源引用面板。
+- 自主任务面板。
+- 任务步骤、置信度、证据数、复核标记展示。
 
-curl / API client / future frontend 调用
-表示“调用方”的形式：
+HTTP 非流式接口 `/api/v1/chat`
+普通的 POST 接口，服务端一次性返回完整回答。适合简单调用或后端对接。响应里会返回 `conversation_id`，用于后续复用记忆。
 
-curl：命令行测试工具
-API client：比如 Postman、Apifox、Python/JS 调用
-future frontend：将来接网页或应用前端来调用上述接口
+SSE 流式接口 `/api/v1/chat/stream`
+用 Server-Sent Events 持续推送响应，客户端可以边接收边显示，固定事件包括 `tool_call`、`tool_result`、`answer`、`citation`、`done`、`error`。
+
+强自主任务接口 `/api/v1/agent/run`
+一次性执行一个目标任务，返回完整任务轨迹。适合展示“Agent 不只是问答，而是能拆计划、调用工具、恢复失败、反思审查”。
+
+curl / API client
+仍然可以用命令行、Postman、Apifox、Python/JS 调用上述接口。
 
 #### 后端 API 层
 
 核心职责：
 
 - 接收用户消息。
+- 读取短期和长期记忆。
 - 构造 `ModelRouter`。
 - 构造 IC 工具注册表。
 - 构造 `LangGraphICAgent`。
 - 执行 Agent。
 - 调用引用重写。
+- 保存用户与助手消息到记忆。
 - 返回结构化响应。
+- 对强自主任务，构造 `AutonomousAgent` 并返回完整任务轨迹。
 
 关键文件：
 
 - `app/main.py`
 - `app/api/routes/chat.py`
+- `app/api/routes/agent.py`
 - `app/api/routes/document.py`
 - `app/api/routes/health.py`
 ```
@@ -527,15 +575,29 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
 
 核心职责：
 
+普通问答 Agent：
+
 - 判断用户问题是否需要澄清。
 - 判断是否属于 IC 领域。
 - 判断要调用哪些工具。
 - 把工具结果组织成上下文交给大模型。
 - 在证据不足时严格拒答。
 
+强自主 Agent：
+
+- 根据目标生成计划。
+- 按步骤执行工具或推理。
+- 捕获工具失败并降级恢复。
+- 收集 evidence、confidence、review_flags。
+- 生成最终交付。
+- 调用反思 Agent 做质量审查。
+- 生成任务级 audit_summary。
+
 关键文件：
 
 - `app/core/agent/langgraph_agent.py`
+- `app/core/agent/autonomous.py`
+- `app/core/agent/reflection.py`
 
 #### 工具层
 
@@ -543,6 +605,8 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
 
 - 把不同能力封装成可调用工具。
 - Agent 不直接关心工具内部实现，只关心工具名和参数。
+- 工具调用前做参数 schema 校验。
+- 工具结果统一归一化为 `ok/result/summary/evidence/confidence/review_flags`。
 
 核心工具：
 
@@ -555,6 +619,7 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
 - `app/core/tools/builtin/ic_tools.py`
 - `app/core/tools/registry.py`
 - `app/core/tools/factory.py`
+- `app/core/tools/base.py`
 
 #### 数据层 / 检索层
 
@@ -565,12 +630,18 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
 - 写入或读取 Chroma。
 - 检索 top-k 文档。
 - 返回带 source/page/chunk_id 的结构化结果。
+- 管理本地 JSONL 会话记忆。
+- 可选使用 Milvus 保存长期向量记忆。
 
 关键文件：
 
 - `app/core/rag/retriever.py`
 - `app/core/rag/reranker.py`
 - `app/core/rag/citation_rewriter.py`
+- `app/core/memory/local.py`
+- `app/core/memory/milvus.py`
+- `app/core/memory/manager.py`
+- `app/core/memory/factory.py`
 - `app/etl/ic_text_splitter.py`
 
 ---
@@ -584,33 +655,76 @@ ModelRouter 是这个项目里的“大模型调用层路由器”，不是 Agen
    |
 2. FastAPI chat endpoint 接收 ChatRequest
    |
-3. 构造 LangGraphICAgent
+3. 根据 conversation_id 读取短期历史和长期记忆
    |
-4. pre_tool_router 分析问题
+4. 构造 LangGraphICAgent
+   |
+5. pre_tool_router 分析问题
    |-- 太短：进入 clarify
    |-- 非 IC：不调用工具，后续严格拒答
    |-- IC 知识：选择 ic_rag_search
    |-- Verilog 代码：选择 ic_rag_search + verilog_code_analyzer
    |-- 时序约束：选择 ic_rag_search + timing_constraint_suggester
    |
-5. tool_executor 执行工具
+6. tool_executor 执行工具
    |
-6. ic_rag_search 调用 ICRAGRetriever
+7. 工具注册中心校验参数，并把工具结果归一化为审计记录
    |
-7. Retriever 从 Chroma / LlamaIndex 检索文档，必要时 rerank
+8. ic_rag_search 调用 ICRAGRetriever
    |
-8. 工具结果被塞进 answer_generator 的上下文
+9. Retriever 从 Chroma / LlamaIndex 检索文档，必要时 rerank
    |
-9. LLM 严格基于工具结果生成回答
+10. 工具结果被塞进 answer_generator 的上下文
    |
-10. citation_rewriter 删除模型自造引用，重建服务端引用
+11. LLM 严格基于工具结果生成回答
    |
-11. 返回 ChatResponse：answer、trace_id、sources、tool_events
+12. citation_rewriter 删除模型自造引用，重建服务端引用
+   |
+13. 保存本轮 user/assistant 到记忆
+   |
+14. 返回 ChatResponse：answer、conversation_id、trace_id、sources、tool_events
 ```
 
 面试中可以强调：
 
 > 这个系统的数据流不是“问题直接给大模型”，而是先经过领域路由，再经过工具执行，再由模型基于工具证据回答，最后服务端治理引用。
+
+以一次 `/api/v1/agent/run` 请求为例。
+
+```text
+1. 用户提交目标 goal
+   |
+2. FastAPI agent endpoint 创建或复用 conversation_id
+   |
+3. AutonomousAgent 先把目标写入记忆
+   |
+4. _plan 使用 LLM 规划；LLM 不可用时走启发式计划
+   |
+5. 逐步执行 steps
+   |-- tool step：构造工具参数，调用 invoke_with_audit
+   |-- reasoning step：调用 LLM 推理，失败时降级为保守观察
+   |
+6. 每一步记录 rationale、arguments、observation、evidence、confidence、review_flags
+   |
+7. 工具失败时记录 error，并用 _recover 降级恢复
+   |
+8. _finalize 汇总执行轨迹、证据边界和下一步
+   |
+9. _reflect 做反思审查；反思模型不可用时保守评分
+   |
+10. _build_audit_summary 生成任务级审计摘要
+   |
+11. 根据 error/review_flags/confidence/reflection 推导状态
+   |-- completed
+   |-- needs_review
+   |-- failed
+   |
+12. 保存最终结果到记忆，返回 AutonomousTask
+```
+
+面试中可以强调：
+
+> `/agent/run` 和普通问答最大的区别是它不是单轮回答，而是“目标 -> 计划 -> 执行 -> 恢复 -> 反思 -> 审计”的任务闭环。即使工具失败，它也会保留错误和复核标记，不会把低证据结果包装成确定结论。
 
 ---
 
@@ -1550,6 +1664,201 @@ groundtruth 就是标准答案 / 标注答案 / 参考真值。
 
 ---
 
+### 模块九：记忆系统 Memory
+
+关键文件：
+
+- `app/core/memory/manager.py`
+- `app/core/memory/local.py`
+- `app/core/memory/milvus.py`
+- `app/core/memory/factory.py`
+- `app/api/routes/chat.py`
+
+#### 存在的必要性
+
+没有记忆的问答机器人每一轮都像第一次见用户。用户追问“继续展开”“那 hold 呢？”时，如果系统不记得上一轮，就会答偏。
+
+这个项目的记忆系统解决两个问题：
+
+- 短期记忆：保留最近若干轮 user/assistant 消息，让追问有上下文。
+- 长期记忆：把重要内容写入可召回存储，下次同会话提问时可以检索回来。
+
+#### 当前实现
+
+默认后端是本地 JSONL：
+
+```text
+MEMORY_ENABLED=true
+MEMORY_BACKEND=local
+MEMORY_STORE_PATH=data/memory
+```
+
+切换 Milvus：
+
+```text
+MEMORY_BACKEND=milvus
+MEMORY_MILVUS_COLLECTION_NAME=agent_memory
+MEMORY_EMBEDDING_MODEL_PATH=BAAI/bge-m3
+```
+
+核心流程：
+
+```text
+chat request
+  -> get_memory_manager()
+  -> memory.get_context(session_id, latest_user_query)
+  -> 注入 short_term_messages 和 long_term_items
+  -> Agent 生成回答
+  -> memory.save() 保存短期历史
+  -> memory.remember() 保存长期记忆
+```
+
+#### 面试怎么讲
+
+> 我把记忆拆成短期历史和长期召回。短期历史解决多轮对话连续性，长期召回解决同一会话里重要信息复用。默认用本地 JSONL，方便开发演示；如果配置 `MEMORY_BACKEND=milvus`，长期记忆会向量化写入 Milvus，并在 Milvus 不可用时回退本地存储。
+
+---
+
+### 模块十：强自主 Agent
+
+关键文件：
+
+- `app/core/agent/autonomous.py`
+- `app/api/routes/agent.py`
+- `app/models/schemas.py`
+
+#### 存在的必要性
+
+普通 `/chat` 更像“问答 Agent”：用户问一次，系统路由工具并回答一次。
+
+`/agent/run` 更像“任务 Agent”：用户给一个目标，系统要能自己拆步骤、执行工具、处理失败、反思质量并输出可复核交付。
+
+#### 核心流程
+
+```text
+goal
+  -> _plan
+  -> execute each AutonomousTaskStep
+  -> _invoke_tool_with_audit
+  -> _recover on failure
+  -> _finalize
+  -> _reflect
+  -> _build_audit_summary
+  -> _derive_status
+```
+
+#### 状态设计
+
+`AutonomousTaskStep` 不是只有文本结果，而是包含：
+
+- `rationale`：为什么执行这一步。
+- `arguments`：工具参数。
+- `observation`：工具或推理观察。
+- `evidence`：可审计证据。
+- `confidence`：步骤置信度。
+- `review_flags`：需要人工复核的原因。
+- `error`：工具失败原因。
+
+`AutonomousTask` 额外包含：
+
+- `audit_summary`
+- `review_flags`
+- `confidence`
+- `reflection`
+- `final_answer`
+
+#### 面试怎么讲
+
+> 我把强自主 Agent 做成目标驱动的任务闭环，而不是让 LLM 一次性回答。它先规划，再逐步执行工具或推理，每一步都记录为什么做、用了什么参数、拿到了什么证据、置信度如何。如果工具失败，会恢复执行但保留错误；最终状态会根据 error、review_flags、confidence 和 reflection 推导，所以证据不足时是 `needs_review`，不会假装完成。
+
+---
+
+### 模块十一：Web 前端
+
+关键文件：
+
+- `app/static/index.html`
+- `app/static/app.js`
+- `app/static/styles.css`
+- `app/main.py`
+
+#### 存在的必要性
+
+只有 API 的 Agent 不容易演示，也不容易观察工具调用过程。前端让用户可以直接看到：
+
+- 当前会话 ID。
+- 聊天内容。
+- 工具调用事件。
+- 引用来源。
+- 自主任务步骤。
+- 每一步的置信度、证据数和复核标记。
+
+#### 当前实现
+
+前端是无构建静态页面：
+
+```text
+GET /
+  -> app/static/index.html
+  -> app/static/app.js
+  -> app/static/styles.css
+```
+
+`app.js` 负责：
+
+- 调用 `/api/v1/chat/stream` 并解析 SSE。
+- 维护 localStorage 中的 `conversation_id` 和最近消息。
+- 渲染工具事件和引用来源。
+- 调用 `/api/v1/agent/run` 并展示任务轨迹。
+
+#### 面试怎么讲
+
+> 我没有把项目停留在接口层，而是加了一个轻量 Web UI。它不是营销页，而是 Agent 工作台：左侧看会话、工具和来源，主区域支持聊天和自主任务。这样演示时能看到 Agent 为什么调用工具、证据来自哪里、哪些结论需要复核。
+
+---
+
+### 模块十二：可靠性审计 Tool Audit
+
+关键文件：
+
+- `app/core/tools/base.py`
+- `app/core/tools/registry.py`
+- `app/core/tools/builtin/ic_tools.py`
+- `tests/test_tool_audit.py`
+- `tests/test_autonomous_agent_audit.py`
+
+#### 存在的必要性
+
+强 Agent 最大的问题不是“能不能答”，而是“答得靠谱不靠谱”。如果工具输出只是一段文本，Agent 很难判断证据强弱，也很难告诉用户哪里需要复核。
+
+所以当前项目把工具结果统一成审计结构：
+
+```text
+{
+  "ok": true,
+  "result": "...",
+  "summary": "...",
+  "evidence": [...],
+  "confidence": "high|medium|low|unknown",
+  "review_flags": [...]
+}
+```
+
+#### 核心机制
+
+- `BaseTool.validate_arguments()`：工具执行前校验参数，拒绝缺必填和未知参数。
+- `ToolRegistry.invoke_with_audit()`：执行工具并把结果归一化为审计记录。
+- `ICRAGSearchTool`：返回检索证据；无结果时标记 `rag_no_results`。
+- `VerilogCodeAnalyzerTool`：返回风险 finding、行级 code evidence 和 review flags。
+- `TimingConstraintSuggesterTool`：返回 SDC 模板、默认假设和缺失上下文标记。
+- `AutonomousAgent._build_audit_summary()`：把步骤级审计汇总成任务级状态。
+
+#### 面试怎么讲
+
+> 我没有只靠 prompt 说“请谨慎回答”，而是在工具层做了硬约束。工具调用前要过参数 schema，工具输出必须带证据、置信度和复核标记。Agent 根据这些字段决定任务是 completed 还是 needs_review。比如 RAG 模型路径坏了，Agent 会恢复执行，但最终会标记工具失败和低置信，而不是输出一个看似确定的答案。
+
+---
+
 ## 第三阶段：关键技术点拎出来（面试重点）
 
 ### 亮点一：LangGraph 状态图编排领域 Agent
@@ -1800,6 +2109,78 @@ function calling 是大模型的一种工具调用机制：
 
 ---
 
+### 亮点七：会话记忆与 Milvus 长期记忆
+
+#### 技术本质
+
+把 Agent 从无状态 API 升级为有上下文的对话系统。
+
+#### 简历写法
+
+> 设计 Agent 记忆系统，支持本地 JSONL 短期历史与长期召回，并可切换 Milvus 向量记忆，实现基于 `conversation_id` 的多轮上下文复用。
+
+#### 面试怎么讲
+
+> 我把记忆拆成两层。短期记忆保存最近多轮消息，解决用户追问时上下文丢失；长期记忆把重要内容写入可召回存储。开发环境默认用本地 JSONL，便于调试和演示；如果设置 `MEMORY_BACKEND=milvus`，长期记忆会通过 embedding 写入 Milvus collection。这样项目不只是单轮问答，而是能围绕一个会话持续积累上下文。
+
+#### 面试官可能追问
+
+问题：为什么不是只把全部历史塞给模型？
+
+回答：
+
+> 全部历史会增加 token 成本，也会引入噪声。短期窗口保留最近上下文，长期记忆只召回与当前问题相关的片段，能在成本和相关性之间取得平衡。
+
+---
+
+### 亮点八：强自主 Agent 任务闭环
+
+#### 技术本质
+
+把“回答问题”升级为“完成目标”：计划、执行、恢复、反思、审计。
+
+#### 简历写法
+
+> 实现强自主 Agent 模式，支持目标规划、多步骤工具执行、失败恢复、反思审查和任务级审计摘要，并通过 `needs_review` 状态控制低证据输出风险。
+
+#### 面试怎么讲
+
+> 普通 `/chat` 是问答链路，`/agent/run` 是任务链路。用户给一个目标后，Agent 先生成计划，再逐步执行工具或推理。每一步都会记录 rationale、arguments、observation、evidence、confidence 和 review_flags。如果工具失败，它不会直接崩掉，而是降级恢复，同时保留错误。最终根据证据和反思结果推导状态，所以低证据任务会返回 `needs_review`。
+
+#### 面试官可能追问
+
+问题：这算强自主 Agent 吗？
+
+回答：
+
+> 它已经具备强自主 Agent 的核心形态：目标驱动、自动规划、多步执行、工具使用、失败恢复、自我审查和状态判断。但它还不是完全生产级 autonomic system，因为现在任务是同步执行，工具集也有限，后续可以加后台任务队列、更多工程工具和人工审批节点。
+
+---
+
+### 亮点九：工具审计与可靠性控制
+
+#### 技术本质
+
+把“工具返回一段文本”升级为“工具返回可审计证据结构”。
+
+#### 简历写法
+
+> 设计工具审计层，对工具参数进行 schema 校验，并将工具输出统一归一化为 evidence、confidence、review_flags 和 summary，支持 Agent 自动判断结果是否需要人工复核。
+
+#### 面试怎么讲
+
+> 我没有只靠 prompt 要求模型谨慎，而是在工具层做硬约束。工具执行前先校验参数，执行后统一输出证据、置信度和复核标记。比如 RAG 没有检索结果会标记 `rag_no_results`，SDC 缺少 IO 背景会标记 `missing_input_delay_context`，Verilog 规则命中会返回行级证据。自主 Agent 根据这些字段决定任务状态，而不是盲目相信模型总结。
+
+#### 面试官可能追问
+
+问题：为什么 confidence 用 high/medium/low，而不是一个精确分数？
+
+回答：
+
+> 当前工具以规则型和检索型为主，很多结果没有严格概率含义。用 high/medium/low 更诚实，也更适合前端展示和任务状态判断。后续如果引入 calibrated evaluator，可以再扩展为数值分数。
+
+---
+
 ## 第四阶段：我必须掌握的知识清单
 
 ### 1. HTTP 与 FastAPI
@@ -1810,8 +2191,10 @@ function calling 是大模型的一种工具调用机制：
 
 - 非流式 chat。
 - SSE 流式 chat。
+- 强自主 Agent 任务。
 - 文档上传。
 - 健康检查。
+- 静态前端页面。
 
 #### 不会会被问死在哪里
 
@@ -1819,6 +2202,7 @@ function calling 是大模型的一种工具调用机制：
 
 - POST `/chat` 的请求和响应是什么？
 - SSE 和普通 HTTP 响应有什么区别？
+- `/agent/run` 和 `/chat` 有什么区别？
 - 为什么 AI 应用常需要 streaming？
 - FastAPI 的 async 有什么意义？
 
@@ -2038,13 +2422,17 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 > 普通 ChatGPT 套壳是用户问题直接给模型，回答依赖模型自身知识。我的项目是一个垂类 Agent 系统，先通过 LangGraph 做意图路由，再调用 IC RAG 检索、Verilog 分析、时序约束建议等工具，最后基于工具结果回答。并且我做了服务端 citation rewriting，只展示真实检索到的 source/page，还加入了 RAGAS 和自定义指标评测，所以它更强调专业性、可控性和可验证性。
 
+新版补充：
+
+> 现在项目还加入了会话记忆、Milvus 长期记忆、Web UI 和强自主 Agent。强自主模式不是单轮回答，而是会自动规划、执行工具、失败恢复、反思审查，并返回 evidence、confidence 和 review_flags，所以更接近一个可审计的任务型 Agent。
+
 ---
 
 ### Q2：项目里最有技术含量的地方是什么？
 
 回答：
 
-> 我认为有三个点。第一是 LangGraph 主链路，把澄清、工具路由、工具执行、答案生成拆成显式状态图。第二是 IC 定制 RAG，不只是普通向量检索，还做了 Verilog module、章节和时序图边界保留，以及 query expansion 和 rerank。第三是引用治理，服务端会删除模型自造参考资料，只根据真实检索结果重写引用，降低 RAG 幻觉。
+> 我认为有五个点。第一是 LangGraph 主链路，把澄清、工具路由、工具执行、答案生成拆成显式状态图。第二是 IC 定制 RAG，不只是普通向量检索，还做了 Verilog module、章节和时序图边界保留，以及 query expansion 和 rerank。第三是引用治理，服务端会删除模型自造参考资料，只根据真实检索结果重写引用。第四是强自主 Agent，支持计划、执行、恢复、反思和审计。第五是工具可靠性审计，工具输出会带 evidence、confidence 和 review_flags。
 
 ---
 
@@ -2052,7 +2440,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 回答：
 
-> 我会从三方面优化。第一是检索质量，引入 hybrid search、metadata filtering 和更细的 chunk hierarchy。第二是工具能力，Verilog 分析接入 Verilator 或 yosys，从正则检查升级到真实语法/综合检查。第三是工程化，把 Agent、Retriever、ModelRouter 做成应用级复用对象，支持真正 token streaming，并把 trace 细化到每个节点，便于线上排查。
+> 我会从四方面优化。第一是检索质量，引入 hybrid search、metadata filtering 和更细的 chunk hierarchy。第二是工具能力，Verilog 分析接入 Verilator 或 yosys，从正则检查升级到真实语法/综合检查。第三是自主任务工程化，把同步 `/agent/run` 升级成后台队列、任务取消和人工审批。第四是观测与评测，把 trace 细化到每个节点，并扩展工具审计指标。
 
 ---
 
@@ -2060,7 +2448,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 回答：
 
-> 项目里有 evaluation 脚本，会读取固定测试集，直接调用最终 chat 主链路，而不是只测单独 retriever。评测指标包括 RAGAS 的 faithfulness、answer relevancy、context recall、context precision，同时我还补充了 citation correctness、refusal correctness 和 tool routing accuracy，因为这个项目的核心风险包括引用幻觉、该拒答不拒答、工具路由错误。
+> 项目里有 evaluation 脚本，会读取固定测试集，直接调用最终 chat 主链路，而不是只测单独 retriever。评测指标包括 RAGAS 的 faithfulness、answer relevancy、context recall、context precision，同时我还补充了 citation correctness、refusal correctness 和 tool routing accuracy。新增的工具审计测试还覆盖了参数校验、Verilog 风险标记、SDC 缺失上下文标记，以及自主 Agent 在 RAG 无证据时必须返回 needs_review。
 
 ---
 
@@ -2068,7 +2456,7 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 回答：
 
-> 我从四层降低风险。第一，router 限制问题范围，非 IC 问题严格拒答。第二，检索未命中时不让模型用通用知识补答。第三，prompt 要求回答必须基于工具结果。第四，服务端 citation rewriter 会移除模型自造引用，只展示本轮真实检索到的 source/page。后续还可以做句子级 evidence 对齐。
+> 我从六层降低风险。第一，router 限制问题范围，非 IC 问题严格拒答。第二，检索未命中时不让模型用通用知识补答。第三，prompt 要求回答必须基于工具结果。第四，服务端 citation rewriter 会移除模型自造引用，只展示本轮真实检索到的 source/page。第五，工具层输出 evidence、confidence 和 review_flags。第六，自主 Agent 根据这些审计字段把低证据任务标记为 needs_review。后续还可以做句子级 evidence 对齐。
 
 ---
 
@@ -2080,46 +2468,73 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 ---
 
+### Q7：你这个现在是 Agent 还是问答机器人？
+
+回答：
+
+> 两种模式都有。`/chat` 是带工具调用和 RAG 的问答 Agent，重点是单轮或多轮专业问答；`/agent/run` 是更强的任务型 Agent，重点是给定目标后自动规划、执行、恢复、反思和审计。所以它已经不是普通问答机器人，而是一个带记忆、工具和自主任务闭环的 IC 领域 Agent。
+
+---
+
+### Q8：你怎么让强自主 Agent 更靠谱？
+
+回答：
+
+> 我没有只靠模型自己判断，而是在工具和任务层加了审计机制。工具调用前做参数校验，工具输出统一包含 evidence、confidence、review_flags。自主 Agent 每一步都记录 rationale、arguments、observation 和 error；如果工具失败或证据不足，任务会进入 needs_review，而不是伪装成 completed。前端也会把这些复核原因展示出来。
+
+---
+
 ## 你应该能画出来的架构图
 
 面试白板版：
 
 ```text
-               +------------------+
-               |   User / Client  |
-               +--------+---------+
-                        |
-                        v
-              +---------+----------+
-              | FastAPI API Layer  |
-              | chat / stream / doc|
-              +---------+----------+
-                        |
-                        v
-            +-----------+------------+
-            |   LangGraphICAgent     |
-            | router -> tools -> ans |
-            +-----------+------------+
-                        |
-      +-----------------+-----------------+
-      |                 |                 |
-      v                 v                 v
-+-----+------+   +------+-------+   +-----+------+
-| IC RAG     |   | Verilog Tool |   | Timing Tool|
-| Search     |   | Analyzer     |   | SDC Suggest|
-+-----+------+   +--------------+   +------------+
-      |
-      v
-+-----+-----------------------------+
-| LlamaIndex + Chroma + Embedding   |
-| IC Splitter + Reranker            |
-+-----+-----------------------------+
-      |
-      v
-+-----+-----------------------------+
-| citation_rewriter                 |
-| only real source/page references  |
-+-----------------------------------+
+                    +----------------------+
+                    | User / Browser / API |
+                    +----------+-----------+
+                               |
+                               v
+                    +----------+-----------+
+                    | FastAPI API Layer    |
+                    | / /chat /stream      |
+                    | /agent/run /document |
+                    +----------+-----------+
+                               |
+          +--------------------+--------------------+
+          |                                         |
+          v                                         v
++---------+-----------+                 +-----------+----------+
+| LangGraphICAgent    |                 | AutonomousAgent      |
+| router -> tools     |                 | plan -> execute      |
+| -> answer           |                 | recover -> reflect   |
++---------+-----------+                 +-----------+----------+
+          |                                         |
+          +--------------------+--------------------+
+                               |
+                               v
+                    +----------+-----------+
+                    | ToolRegistry Audit   |
+                    | schema / evidence    |
+                    | confidence / review  |
+                    +----------+-----------+
+                               |
+        +----------------------+----------------------+
+        |                      |                      |
+        v                      v                      v
++-------+------+      +--------+--------+      +------+-------+
+| IC RAG Search |      | Verilog Analyzer|      | SDC Suggest |
++-------+------+      +-----------------+      +------+-------+
+        |
+        v
++-------+----------------------------------------------+
+| LlamaIndex + Chroma + Embedding + Reranker            |
+| IC Splitter + citation_rewriter                       |
++-------+----------------------------------------------+
+        |
+        v
++-------+----------------------------------------------+
+| Memory: local JSONL short/long term, optional Milvus  |
++------------------------------------------------------+
 ```
 
 ---
@@ -2130,14 +2545,19 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 1. `README.md`：理解项目定位和主链路。
 2. `app/main.py`：理解 FastAPI 如何启动和挂载路由。
-3. `app/api/routes/chat.py`：理解请求如何进入 Agent。
-4. `app/core/agent/langgraph_agent.py`：理解 Agent 状态图。
-5. `app/core/tools/factory.py`：理解工具注册。
-6. `app/core/tools/builtin/ic_tools.py`：理解三个 IC 工具。
-7. `app/core/rag/retriever.py`：理解 RAG 检索和索引维护。
-8. `app/etl/ic_text_splitter.py`：理解 IC 定制分块。
-9. `app/core/rag/citation_rewriter.py`：理解引用治理。
-10. `evaluation/evaluate_ragas.py`：理解评测闭环。
+3. `app/static/index.html`、`app/static/app.js`、`app/static/styles.css`：理解前端如何调用 chat 和 agent。
+4. `app/api/routes/chat.py`：理解普通问答如何读取记忆、进入 Agent、保存记忆。
+5. `app/core/agent/langgraph_agent.py`：理解普通问答 Agent 状态图。
+6. `app/api/routes/agent.py`：理解强自主任务入口。
+7. `app/core/agent/autonomous.py`：理解计划、执行、恢复、反思和审计。
+8. `app/core/tools/base.py`、`app/core/tools/registry.py`：理解工具参数校验和审计归一化。
+9. `app/core/tools/builtin/ic_tools.py`：理解三个 IC 工具。
+10. `app/core/memory/manager.py`、`app/core/memory/local.py`、`app/core/memory/milvus.py`：理解记忆系统。
+11. `app/core/rag/retriever.py`：理解 RAG 检索和索引维护。
+12. `app/etl/ic_text_splitter.py`：理解 IC 定制分块。
+13. `app/core/rag/citation_rewriter.py`：理解引用治理。
+14. `tests/test_memory.py`、`tests/test_tool_audit.py`、`tests/test_autonomous_agent_audit.py`：理解新增功能回归测试。
+15. `evaluation/evaluate_ragas.py`：理解评测闭环。
 
 ---
 
@@ -2145,10 +2565,10 @@ Chroma 用来持久化文档 chunk 的向量和 metadata。
 
 如果面试官让你介绍项目，可以直接按这个模板说：
 
-> 我做的是一个面向集成电路领域的 AI Agent 服务，主要用于 IC 专业知识问答和工程辅助。系统后端用 FastAPI 提供 HTTP 和 SSE 接口，核心 Agent 用 LangGraph 编排，主链路包括问题澄清、工具路由、工具执行和答案生成。对于知识类问题，系统会调用 LlamaIndex + Chroma 的 RAG 检索链路，文档进入知识库前会经过 IC 定制分块，尽量保留 Verilog module、章节和时序图边界；对于 Verilog 代码问题，会调用规则型代码分析工具；对于时序问题，会生成 SDC 约束建议。为了降低 RAG 幻觉，我还做了严格拒答和服务端引用重写，最终引用只来自本轮真实检索到的 source/page。最后，项目用 RAGAS 和自定义指标评测 answer quality、citation correctness、refusal correctness 和 tool routing accuracy，形成完整质量闭环。
+> 我做的是一个面向集成电路领域的 AI Agent 服务，主要用于 IC 专业知识问答和工程辅助。系统后端用 FastAPI 提供 HTTP、SSE 和自主任务接口，前端提供一个轻量 Agent 工作台。普通问答链路用 LangGraph 编排，包括记忆读取、问题澄清、工具路由、工具执行和答案生成；知识类问题会调用 LlamaIndex + Chroma 的 RAG 检索链路，文档进入知识库前会经过 IC 定制分块，尽量保留 Verilog module、章节和时序图边界；Verilog 代码问题会调用规则型代码分析工具；时序问题会生成 SDC 约束建议。为了降低幻觉，我做了严格拒答、服务端引用重写和工具审计，最终引用只来自本轮真实检索到的 source/page，工具结果也会返回 evidence、confidence 和 review_flags。除此之外，项目支持本地/Milvus 记忆，并新增 `/agent/run` 强自主 Agent，可以对目标自动规划、执行、失败恢复、反思审查和输出 audit_summary。最后，项目用 RAGAS、自定义指标和新增测试覆盖 answer quality、citation correctness、refusal correctness、tool routing accuracy、记忆和工具审计，形成完整质量闭环。
 
 ---
 
 ## 一句话总结
 
-这个项目最核心的价值不是“调用了大模型”，而是把大模型放进了一个可控的 IC 专业 Agent 工程体系里：有领域路由、有工具调用、有检索增强、有引用治理、有严格拒答、有评测闭环。
+这个项目最核心的价值不是“调用了大模型”，而是把大模型放进了一个可控、可追溯、可复核的 IC 专业 Agent 工程体系里：有领域路由、有工具调用、有检索增强、有记忆系统、有自主任务闭环、有引用治理、有严格拒答、有可靠性审计、有前端展示，也有评测闭环。
