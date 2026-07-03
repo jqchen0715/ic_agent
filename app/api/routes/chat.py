@@ -139,6 +139,25 @@ async def _prepare_messages(
     return _merge_memory_messages(memory_messages, base_messages), context
 
 
+def _filter_sources_by_references(
+    sources: list[dict[str, Any]],
+    references: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    if not references:
+        return []
+
+    allowed = {
+        (str(item.get("source", "")).strip(), str(item.get("page", "")).strip())
+        for item in references
+    }
+    return [
+        item
+        for item in sources
+        if (str(item.get("source", "")).strip(), str(item.get("page", "")).strip())
+        in allowed
+    ]
+
+
 async def _save_memory_turn(
     request: ChatRequest,
     session_id: str,
@@ -189,15 +208,20 @@ async def chat(request: ChatRequest) -> ChatResponse:
             max_tokens=request.max_tokens,
         )
         rewritten = rewrite_answer_citations(result.content, result.sources)
+        response_sources = _filter_sources_by_references(result.sources, rewritten.references)
 
         model_used = result.model_id or request.model or get_settings().openai_model
         logger.info(
-            "LangGraph 路由完成 trace={} tools={} reason={} clarify={} removed_fake_refs={}",
+            (
+                "LangGraph 路由完成 trace={} tools={} reason={} clarify={} "
+                "removed_fake_refs={} suppressed_refs={}"
+            ),
             trace_id,
             result.selected_tools,
             result.route_reason,
             result.needs_clarification,
             rewritten.removed_fake_count,
+            rewritten.suppressed_references,
         )
         await _save_memory_turn(request, session_id, trace_id, rewritten.answer)
 
@@ -209,10 +233,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 "usage": result.usage,
                 "tools": result.selected_tools,
                 "tool_events": len(result.tool_events),
-                "sources": len(result.sources),
+                "sources": len(response_sources),
                 "route_reason": result.route_reason,
                 "needs_clarification": result.needs_clarification,
                 "removed_fake_refs": rewritten.removed_fake_count,
+                "suppressed_refs": rewritten.suppressed_references,
                 "memory_short_items": (
                     len(memory_context.short_term_messages) if memory_context else 0
                 ),
@@ -228,7 +253,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             content=rewritten.answer,
             trace_id=trace_id,
             usage=result.usage,
-            sources=result.sources,
+            sources=response_sources,
             tool_events=result.tool_events,
         )
     except HTTPException:
@@ -267,6 +292,7 @@ async def _stream_generator(
             max_tokens=request.max_tokens,
         )
         rewritten = rewrite_answer_citations(result.content, result.sources)
+        response_sources = _filter_sources_by_references(result.sources, rewritten.references)
         model_used = result.model_id or request.model or get_settings().openai_model
 
         for event in result.tool_events:
@@ -290,7 +316,8 @@ async def _stream_generator(
                     "trace_id": trace_id,
                     "tool": tool_name,
                     "ok": bool(event.get("ok", False)),
-                    "summary": event.get("summary") or _summarize_tool_result(event.get("result", "")),
+                    "summary": event.get("summary")
+                    or _summarize_tool_result(event.get("result", "")),
                     "confidence": event.get("confidence", "unknown"),
                     "review_flags": event.get("review_flags", []),
                     "evidence": event.get("evidence", []),
@@ -336,8 +363,9 @@ async def _stream_generator(
                 "conversation_id": session_id,
                 "model": model_used,
                 "tool_events": len(result.tool_events),
-                "sources": len(result.sources),
+                "sources": len(response_sources),
                 "removed_fake_refs": rewritten.removed_fake_count,
+                "suppressed_refs": rewritten.suppressed_references,
                 "memory_short_items": (
                     len(memory_context.short_term_messages) if memory_context else 0
                 ),

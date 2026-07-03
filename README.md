@@ -350,11 +350,19 @@ project-python/
 1. 创建虚拟环境并安装依赖。
 
 ```bash
-python -m venv .venv
+uv venv --python 3.12
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+uv pip install -r requirements.txt
+uv pip install -e .
 ```
+
+如果已经误用了 `Python 3.11.0b*` 这类 beta 解释器创建 `.venv`，先重建环境：
+
+```bash
+uv run --python 3.12 python -V
+```
+
+确认输出是 `Python 3.12.x` 后，再运行脚本或服务。
 
 2. 配置环境变量。
 
@@ -377,5 +385,6 @@ curl http://127.0.0.1:8000/api/v1/health
 ## 当前注意事项
 
 - LLM API 不可用时，自主 Agent 会走 fallback，并将结果标记为 `needs_review`。
+- 不要使用 `Python 3.11.0b*` beta 解释器；Chroma/Numpy/SQLAlchemy 等依赖会在导入阶段失败。推荐 `Python 3.12.x`。
 - RAG embedding 模型路径不可用时，`ic_rag_search` 会失败，自主 Agent 会记录工具错误并要求复核。
 - 规则型 Verilog/SDC 工具适合做初筛，不替代 Verilator、Yosys、STA 工具或人工 signoff。
