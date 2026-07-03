@@ -24,6 +24,7 @@ except Exception:
 
 from app.core.rag.knowledge_builder import (
     KnowledgeBuilder,
+    KnowledgeBuildResult,
     first_present,
     normalize_page_number,
 )
@@ -295,7 +296,7 @@ class ICRAGRetriever:
             self._consistency_report = None
         return self._consistency_report
 
-    def index_pdf(self, pdf_path: str | Path) -> SourceConsistencyReport | None:
+    def index_pdf(self, pdf_path: str | Path) -> KnowledgeBuildResult:
         """增量更新单个 PDF 到 Chroma（用于上传后立即可检索）。"""
         self._chroma_path.mkdir(parents=True, exist_ok=True)
         chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
@@ -310,7 +311,7 @@ class ICRAGRetriever:
             self._consistency_report = self._check_source_consistency(collection)
         except Exception:
             self._consistency_report = None
-        return self._consistency_report
+        return result
 
     def _run_reranker(
         self,

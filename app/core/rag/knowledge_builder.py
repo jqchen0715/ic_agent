@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ class KnowledgeBuildResult:
     pdf_count: int
     collection_name: str
     chroma_path: Path
+    documents: list[Any] = field(default_factory=list)
 
 
 def normalize_page_number(raw: Any) -> int | None:
@@ -52,6 +53,24 @@ def first_present(*values: Any) -> Any:
             continue
         return value
     return None
+
+
+def make_chunk_id(
+    *,
+    source: str,
+    file_hash: str,
+    page_num: int | None,
+    chunk_index: int,
+) -> str:
+    """生成稳定且可放入 document_chunks.vector_id 的 chunk id。"""
+    source_path = Path(source)
+    suffix = source_path.suffix[:8]
+    source_label = (source_path.stem or "pdf")[:56]
+    page_label = str(page_num) if page_num is not None else "unknown"
+    fingerprint = hashlib.sha1(
+        f"{source}|{file_hash}|{page_label}|{chunk_index}".encode()
+    ).hexdigest()[:10]
+    return f"{source_label}{suffix}#p{page_label}#c{chunk_index}#{fingerprint}"
 
 
 class KnowledgeBuilder:
@@ -139,16 +158,19 @@ class KnowledgeBuilder:
 
             chunk_counts_by_source[source] = chunk_counts_by_source.get(source, 0) + 1
             chunk_index = chunk_counts_by_source[source]
-            chunk_id = (
-                f"{source}#p{page_num if page_num is not None else 'unknown'}"
-                f"#c{chunk_index}"
+            file_hash = file_hashes.get(source, "")
+            chunk_id = make_chunk_id(
+                source=source,
+                file_hash=file_hash,
+                page_num=page_num,
+                chunk_index=chunk_index,
             )
             metadata.update(
                 {
                     "source": source,
                     "file_name": source,
                     "file_path": str(source_path),
-                    "file_hash": file_hashes.get(source, ""),
+                    "file_hash": file_hash,
                     "chunk_id": chunk_id,
                     "chunk_index": chunk_index,
                     "chunk_strategy": "ic_custom",
@@ -191,8 +213,8 @@ class KnowledgeBuilder:
             ("file_path", str(pdf_path.resolve())),
         }
         ids: set[str] = set()
-        for field, value in candidates:
-            ids.update(self._matching_chunk_ids(collection, field, value))
+        for metadata_field, value in candidates:
+            ids.update(self._matching_chunk_ids(collection, metadata_field, value))
         if not ids:
             return 0
 
@@ -226,8 +248,8 @@ class KnowledgeBuilder:
             f"开始构建知识库: pdfs={pdf_count} "
             f"chunks={len(documents)} collection={self.collection_name}"
         )
-        index = VectorStoreIndex.from_documents(
-            documents,
+        index = VectorStoreIndex(
+            nodes=documents,
             storage_context=storage_context,
             embed_model=self.embed_model,
             show_progress=show_progress,
@@ -238,6 +260,7 @@ class KnowledgeBuilder:
             pdf_count=pdf_count,
             collection_name=self.collection_name,
             chroma_path=self.chroma_path,
+            documents=documents,
         )
 
     def index_pdf(
@@ -263,8 +286,8 @@ class KnowledgeBuilder:
             f"开始增量更新知识库: pdf={pdf.name} deleted_chunks={deleted} "
             f"new_chunks={len(documents)} collection={self.collection_name}"
         )
-        index = VectorStoreIndex.from_documents(
-            documents,
+        index = VectorStoreIndex(
+            nodes=documents,
             storage_context=storage_context,
             embed_model=self.embed_model,
             show_progress=show_progress,
@@ -275,4 +298,5 @@ class KnowledgeBuilder:
             pdf_count=1,
             collection_name=self.collection_name,
             chroma_path=self.chroma_path,
+            documents=documents,
         )

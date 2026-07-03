@@ -6,6 +6,7 @@ import asyncio
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from loguru import logger
@@ -36,7 +37,46 @@ def _sync_pdf_to_data_dir(uploaded_path: Path, filename: str, doc_id: str) -> Pa
     return target
 
 
-def _index_pdf_in_chroma(pdf_path: Path) -> str:
+def _document_text(document: Any) -> str:
+    text = (getattr(document, "text", None) or "").strip()
+    if text:
+        return text
+
+    getter = getattr(document, "get_content", None)
+    if callable(getter):
+        try:
+            return (getter() or "").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _document_metadata(document: Any) -> dict[str, Any]:
+    metadata = getattr(document, "metadata", None)
+    return dict(metadata or {}) if isinstance(metadata, dict) else {}
+
+
+def _chunk_rows_from_vector_documents(documents: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for i, document in enumerate(documents):
+        metadata = _document_metadata(document)
+        chunk_id = str(
+            metadata.get("chunk_id")
+            or getattr(document, "node_id", "")
+            or getattr(document, "id_", "")
+        )
+        rows.append(
+            {
+                "chunk_index": int(metadata.get("chunk_index") or i + 1),
+                "content": _document_text(document),
+                "vector_id": chunk_id or None,
+                "meta": metadata,
+            }
+        )
+    return rows
+
+
+def _index_pdf_in_chroma(pdf_path: Path) -> tuple[str, list[Any]]:
     settings = get_settings()
     retriever = ICRAGRetriever(
         data_dir=settings.data_path,
@@ -46,10 +86,11 @@ def _index_pdf_in_chroma(pdf_path: Path) -> str:
         embedding_device=settings.embedding_device,
         mismatch_strategy=settings.source_mismatch_strategy,
     )
-    report = retriever.index_pdf(pdf_path)
+    result = retriever.index_pdf(pdf_path)
+    report = retriever.source_consistency_report
     if report is None:
-        return "indexed"
-    return report.reason
+        return "indexed", result.documents
+    return report.reason, result.documents
 
 
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
@@ -72,31 +113,45 @@ async def upload_document(
         logger.exception("保存上传文件失败: {}", exc)
         raise HTTPException(status_code=500, detail=f"保存文件失败: {exc!s}") from exc
 
-    pipeline = ETLPipeline()
-    try:
-        etl = await pipeline.run_bytes(
-            raw,
-            filename=safe_name,
-            mime_type=file.content_type,
-            strategy=ChunkStrategy.IC_CUSTOM,
-        )
-    except Exception as exc:
-        logger.exception("ETL 失败: {}", exc)
-        raise HTTPException(status_code=422, detail=f"文档解析失败: {exc!s}") from exc
-
     vector_status = "skipped"
     vector_message = "非 PDF 文件，未写入向量库"
     data_synced_path = ""
+    chunk_rows: list[dict[str, Any]]
     is_pdf = safe_name.lower().endswith(".pdf") or file.content_type == "application/pdf"
     if is_pdf:
         try:
             synced = await asyncio.to_thread(_sync_pdf_to_data_dir, dest, safe_name, doc_id)
             data_synced_path = str(synced)
-            vector_message = await asyncio.to_thread(_index_pdf_in_chroma, synced)
+            vector_message, vector_documents = await asyncio.to_thread(
+                _index_pdf_in_chroma,
+                synced,
+            )
+            chunk_rows = _chunk_rows_from_vector_documents(vector_documents)
             vector_status = "indexed"
         except Exception as exc:
             logger.exception("向量入库失败: {}", exc)
             raise HTTPException(status_code=500, detail=f"向量入库失败: {exc!s}") from exc
+    else:
+        pipeline = ETLPipeline()
+        try:
+            etl = await pipeline.run_bytes(
+                raw,
+                filename=safe_name,
+                mime_type=file.content_type,
+                strategy=ChunkStrategy.IC_CUSTOM,
+            )
+        except Exception as exc:
+            logger.exception("ETL 失败: {}", exc)
+            raise HTTPException(status_code=422, detail=f"文档解析失败: {exc!s}") from exc
+        chunk_rows = [
+            {
+                "chunk_index": i,
+                "content": chunk_text,
+                "vector_id": None,
+                "meta": None,
+            }
+            for i, chunk_text in enumerate(etl.chunks)
+        ]
 
     doc = Document(
         id=doc_id,
@@ -105,22 +160,23 @@ async def upload_document(
         storage_path=str(dest),
         status="ready",
         meta={
-            "chunk_count": len(etl.chunks),
+            "chunk_count": len(chunk_rows),
             "vector_status": vector_status,
             "vector_message": vector_message,
             "data_synced_path": data_synced_path,
+            "chunk_source": "chroma_index" if is_pdf else "etl_pipeline",
         },
     )
     session.add(doc)
 
-    for i, chunk_text in enumerate(etl.chunks):
+    for row in chunk_rows:
         chunk = DocumentChunk(
             id=str(uuid.uuid4()),
             document_id=doc_id,
-            chunk_index=i,
-            content=chunk_text[:65000],
-            vector_id=None,
-            meta=None,
+            chunk_index=row["chunk_index"],
+            content=str(row["content"])[:65000],
+            vector_id=row["vector_id"],
+            meta=row["meta"],
         )
         session.add(chunk)
 
@@ -130,7 +186,7 @@ async def upload_document(
         document_id=doc_id,
         filename=safe_name,
         status="ready",
-        chunk_count=len(etl.chunks),
+        chunk_count=len(chunk_rows),
         message="上传并分块成功",
     )
 
