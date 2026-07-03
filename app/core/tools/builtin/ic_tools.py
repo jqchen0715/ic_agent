@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """IC 领域工具：知识检索、Verilog 审查、时序约束建议。"""
 
 from __future__ import annotations
@@ -188,7 +187,10 @@ def _rank_results_by_terms(results: list[ICRetrievalResult], query: str) -> list
     for item in results:
         key = _result_identity(item)
         prev = best_by_key.get(key)
-        if prev is None or _weighted_result_score(item, query) > _weighted_result_score(prev, query):
+        if prev is None or _weighted_result_score(item, query) > _weighted_result_score(
+            prev,
+            query,
+        ):
             best_by_key[key] = item
 
     return sorted(
@@ -243,6 +245,10 @@ class ICRAGSearchTool(BaseTool):
             mismatch_strategy=settings.source_mismatch_strategy,
             enable_reranker=settings.rag_enable_reranker,
             retrieval_candidate_k=settings.rag_retrieval_candidate_k,
+            enable_keyword_retrieval=settings.rag_enable_keyword_retrieval,
+            keyword_candidate_k=settings.rag_keyword_candidate_k,
+            dense_weight=settings.rag_dense_weight,
+            keyword_weight=settings.rag_keyword_weight,
             rerank_top_k=settings.rag_rerank_top_k,
             reranker_model=settings.rag_reranker_model,
             reranker_device=settings.rag_reranker_device,
@@ -256,7 +262,11 @@ class ICRAGSearchTool(BaseTool):
 
         expanded_query = _expand_ic_query(query)
         retriever = self._ensure_retriever()
-        results = await asyncio.to_thread(retriever.retrieve, expanded_query, max(self._top_k * 3, 10))
+        results = await asyncio.to_thread(
+            retriever.retrieve,
+            expanded_query,
+            max(self._top_k * 3, 10),
+        )
         if not results:
             return {
                 "query": query,
@@ -307,7 +317,10 @@ class ICRAGSearchTool(BaseTool):
                 "confidence": "low",
                 "review_flags": ["rag_weak_evidence"],
                 "summary": "知识库中未找到足够相关的信息。",
-                "reason": "知识库中未找到足够相关的信息，请补充更具体的问题（例如：乘法器的结构/时序优化/Verilog实现）。",
+                "reason": (
+                    "知识库中未找到足够相关的信息，请补充更具体的问题"
+                    "（例如：乘法器的结构/时序优化/Verilog实现）。"
+                ),
             }
 
         return {
@@ -389,7 +402,12 @@ class VerilogCodeAnalyzerTool(BaseTool):
         for start_line, header, body in always_blocks:
             header_lower = header.lower()
             body_lower = body.lower()
-            if ("@*" in header_lower or "@(*)" in header_lower or "always_comb" in header_lower) and (
+            is_comb_always = (
+                "@*" in header_lower
+                or "@(*)" in header_lower
+                or "always_comb" in header_lower
+            )
+            if is_comb_always and (
                 ("if" in body_lower and "else" not in body_lower)
                 or ("case" in body_lower and "default" not in body_lower)
             ):
@@ -401,7 +419,11 @@ class VerilogCodeAnalyzerTool(BaseTool):
                     header,
                 )
 
-            if "always @" in header_lower and "@*" not in header_lower and "@(*)" not in header_lower:
+            if (
+                "always @" in header_lower
+                and "@*" not in header_lower
+                and "@(*)" not in header_lower
+            ):
                 sensitivity = _extract_sensitivity(header)
                 if not any(edge in sensitivity for edge in ("posedge", "negedge")):
                     add_finding(
@@ -440,7 +462,12 @@ class VerilogCodeAnalyzerTool(BaseTool):
                 )
 
         if not findings:
-            findings.append({"severity": "pass", "message": "基础静态审查未发现明显 IC 设计常见问题。"})
+            findings.append(
+                {
+                    "severity": "pass",
+                    "message": "基础静态审查未发现明显 IC 设计常见问题。",
+                }
+            )
 
         if len(verilog_code) < 80 or "module" not in code_lower:
             review_flags.append("input_may_be_incomplete")
@@ -467,8 +494,18 @@ class TimingConstraintSuggesterTool(BaseTool):
         self.risk_level = "high"
         self.parameters = [
             ToolParameter(name="module_name", type="string", description="模块名", required=False),
-            ToolParameter(name="clock_period_ns", type="number", description="时钟周期(ns)", required=False),
-            ToolParameter(name="io_description", type="string", description="IO描述", required=False),
+            ToolParameter(
+                name="clock_period_ns",
+                type="number",
+                description="时钟周期(ns)",
+                required=False,
+            ),
+            ToolParameter(
+                name="io_description",
+                type="string",
+                description="IO描述",
+                required=False,
+            ),
             ToolParameter(name="query", type="string", description="原始用户问题", required=False),
         ]
 
@@ -478,7 +515,11 @@ class TimingConstraintSuggesterTool(BaseTool):
 
         clock_period_ns_raw = kwargs.get("clock_period_ns")
         try:
-            clock_period_ns = float(clock_period_ns_raw) if clock_period_ns_raw is not None else _guess_clock_period_ns(query, 5.0)
+            clock_period_ns = (
+                float(clock_period_ns_raw)
+                if clock_period_ns_raw is not None
+                else _guess_clock_period_ns(query, 5.0)
+            )
         except (TypeError, ValueError):
             clock_period_ns = _guess_clock_period_ns(query, 5.0)
 
@@ -508,14 +549,26 @@ set_clock_latency 0.1 [get_clocks sys_clk]
 """
 
         if "input" in io_description.lower() or "in" in io_description.lower():
-            sdc += f"set_input_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} [get_ports {{输入端口列表}}]\n"
-            sdc += f"set_input_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} [get_ports {{输入端口列表}}]\n"
+            sdc += (
+                f"set_input_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} "
+                "[get_ports {输入端口列表}]\n"
+            )
+            sdc += (
+                f"set_input_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} "
+                "[get_ports {输入端口列表}]\n"
+            )
         else:
             review_flags.append("missing_input_delay_context")
 
         if "output" in io_description.lower() or "out" in io_description.lower():
-            sdc += f"set_output_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} [get_ports {{输出端口列表}}]\n"
-            sdc += f"set_output_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} [get_ports {{输出端口列表}}]\n"
+            sdc += (
+                f"set_output_delay -clock sys_clk -max {clock_period_ns * 0.3:.2f} "
+                "[get_ports {输出端口列表}]\n"
+            )
+            sdc += (
+                f"set_output_delay -clock sys_clk -min {clock_period_ns * 0.05:.2f} "
+                "[get_ports {输出端口列表}]\n"
+            )
         else:
             review_flags.append("missing_output_delay_context")
 

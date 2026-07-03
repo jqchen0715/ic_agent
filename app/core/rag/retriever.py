@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
+import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +45,18 @@ class SourceConsistencyReport:
     actual_sources: set[str]
 
 
+_KEYWORD_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|\d+(?:\.\d+)?|[\u4e00-\u9fff]+")
+
+
+@dataclass
+class KeywordCorpusItem:
+    """Chroma 中可用于 BM25 的单个 chunk。"""
+
+    id: str
+    text: str
+    metadata: dict[str, Any]
+
+
 def _normalize_source_name(name: str) -> str:
     if not isinstance(name, str):
         return ""
@@ -64,6 +79,41 @@ def _page_label(metadata: dict[str, Any]) -> str:
     if page_num is None:
         return "页码未知"
     return f"第{page_num}页"
+
+
+def _keyword_tokens(text: str) -> list[str]:
+    """面向 IC/代码文档的轻量分词，保留精确标识符和中文短语。"""
+    tokens: list[str] = []
+    for raw in _KEYWORD_TOKEN_RE.findall(text or ""):
+        token = raw.lower()
+        if not token:
+            continue
+        tokens.append(token)
+
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
+            tokens.extend(token[i : i + 2] for i in range(len(token) - 1))
+            if len(token) > 3:
+                tokens.extend(token[i : i + 3] for i in range(len(token) - 2))
+    return tokens
+
+
+def _keyword_query_terms(query: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for token in _keyword_tokens(query):
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+    return terms
+
+
+def _keyword_result_key(item: ICRetrievalResult) -> tuple[str, str, str]:
+    return (
+        str(item.chunk_id or ""),
+        _normalize_source_name(item.source),
+        str(item.page or ""),
+    )
 
 
 def _extract_item_text(item: NodeWithScore) -> str:
@@ -102,6 +152,10 @@ class ICRAGRetriever:
         chunk_overlap: int = 100,
         enable_reranker: bool = True,
         retrieval_candidate_k: int = 20,
+        enable_keyword_retrieval: bool = True,
+        keyword_candidate_k: int = 20,
+        dense_weight: float = 0.65,
+        keyword_weight: float = 0.55,
         rerank_top_k: int = 10,
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         reranker_device: str | None = None,
@@ -136,6 +190,10 @@ class ICRAGRetriever:
         self._chunk_overlap = chunk_overlap
         self._enable_reranker = enable_reranker
         self._retrieval_candidate_k = max(1, retrieval_candidate_k)
+        self._enable_keyword_retrieval = enable_keyword_retrieval
+        self._keyword_candidate_k = max(1, keyword_candidate_k)
+        self._dense_weight = max(0.0, dense_weight)
+        self._keyword_weight = max(0.0, keyword_weight)
         self._rerank_top_k = max(1, rerank_top_k)
         self._reranker = (
             Reranker(model_name=reranker_model, device=reranker_device)
@@ -144,6 +202,7 @@ class ICRAGRetriever:
         )
         self._index: VectorStoreIndex | None = None
         self._consistency_report: SourceConsistencyReport | None = None
+        self._keyword_corpus: list[KeywordCorpusItem] | None = None
 
     @property
     def source_consistency_report(self) -> SourceConsistencyReport | None:
@@ -234,6 +293,7 @@ class ICRAGRetriever:
             recreate_collection=recreate_collection,
             show_progress=True,
         )
+        self._keyword_corpus = None
         return result.index
 
     def _new_builder(self) -> KnowledgeBuilder:
@@ -289,6 +349,7 @@ class ICRAGRetriever:
         self._chroma_path.mkdir(parents=True, exist_ok=True)
         chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
         self._index = self._build_index(chroma_client, recreate_collection=True)
+        self._keyword_corpus = None
         try:
             collection = chroma_client.get_collection(self._collection_name)
             self._consistency_report = self._check_source_consistency(collection)
@@ -306,6 +367,7 @@ class ICRAGRetriever:
             show_progress=True,
         )
         self._index = result.index
+        self._keyword_corpus = None
         try:
             collection = chroma_client.get_collection(self._collection_name)
             self._consistency_report = self._check_source_consistency(collection)
@@ -313,35 +375,108 @@ class ICRAGRetriever:
             self._consistency_report = None
         return result
 
-    def _run_reranker(
-        self,
-        query: str,
-        results: list[ICRetrievalResult],
-        top_k: int,
-    ) -> list[ICRetrievalResult]:
-        if self._reranker is None or len(results) <= 1:
-            return results[:top_k]
-
-        async def _rerank() -> list[ICRetrievalResult]:
-            return await self._reranker.rerank(query, results, top_k=top_k)
+    def _load_keyword_corpus(self) -> list[KeywordCorpusItem]:
+        if self._keyword_corpus is not None:
+            return self._keyword_corpus
 
         try:
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                return asyncio.run(_rerank())
-
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(lambda: asyncio.run(_rerank()))
-                return future.result()
+            chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
+            collection = chroma_client.get_collection(self._collection_name)
+            data = collection.get(include=["documents", "metadatas"])
         except Exception as exc:
-            logger.warning(f"CrossEncoder 重排序失败，回退 dense 排序: {exc}")
-            return results[:top_k]
+            logger.warning(f"BM25 关键词召回读取 Chroma 失败: {exc}")
+            self._keyword_corpus = []
+            return self._keyword_corpus
 
-    def retrieve(self, query: str, top_k: int = 3) -> list[ICRetrievalResult]:
-        """执行 IC 检索并返回统一结构化结果。"""
+        ids = data.get("ids", []) or []
+        documents = data.get("documents", []) or []
+        metadatas = data.get("metadatas", []) or []
+        corpus: list[KeywordCorpusItem] = []
+        for idx, text in enumerate(documents):
+            content = str(text or "").strip()
+            if not content:
+                continue
+            metadata = (
+                metadatas[idx]
+                if idx < len(metadatas) and isinstance(metadatas[idx], dict)
+                else {}
+            )
+            item_id = str(ids[idx]) if idx < len(ids) else str(metadata.get("chunk_id") or idx)
+            corpus.append(KeywordCorpusItem(id=item_id, text=content, metadata=dict(metadata)))
+
+        self._keyword_corpus = corpus
+        return corpus
+
+    def _keyword_retrieve(self, query: str, candidate_k: int) -> list[ICRetrievalResult]:
+        terms = _keyword_query_terms(query)
+        if not terms:
+            return []
+
+        corpus = self._load_keyword_corpus()
+        if not corpus:
+            return []
+
+        tokenized = [_keyword_tokens(item.text) for item in corpus]
+        lengths = [len(tokens) for tokens in tokenized]
+        avgdl = sum(lengths) / len(lengths) if lengths else 1.0
+        avgdl = max(avgdl, 1.0)
+
+        doc_freq: Counter[str] = Counter()
+        for tokens in tokenized:
+            doc_freq.update(set(tokens))
+
+        term_counts = Counter(terms)
+        k1 = 1.5
+        b = 0.75
+        total_docs = len(corpus)
+        scored: list[tuple[float, KeywordCorpusItem]] = []
+        for item, tokens, doc_len in zip(corpus, tokenized, lengths, strict=True):
+            if not tokens:
+                continue
+
+            counts = Counter(tokens)
+            score = 0.0
+            for term, query_tf in term_counts.items():
+                tf = counts.get(term, 0)
+                if tf <= 0:
+                    continue
+                df = max(1, doc_freq.get(term, 0))
+                idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+                denom = tf + k1 * (1.0 - b + b * doc_len / avgdl)
+                score += query_tf * idf * (tf * (k1 + 1.0)) / denom
+
+            if score <= 0:
+                continue
+
+            lower_text = item.text.lower()
+            exact_bonus = sum(0.2 for term in term_counts if len(term) > 1 and term in lower_text)
+            scored.append((score + exact_bonus, item))
+
+        if not scored:
+            return []
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        max_score = max(score for score, _ in scored) or 1.0
+        results: list[ICRetrievalResult] = []
+        for raw_score, item in scored[:candidate_k]:
+            metadata = item.metadata
+            source = Path(
+                str(metadata.get("source") or metadata.get("file_name") or "unknown")
+            ).name
+            chunk_id = str(metadata.get("chunk_id") or item.id)
+            results.append(
+                ICRetrievalResult(
+                    content=item.text,
+                    source=source,
+                    page=_page_label(metadata),
+                    score=(raw_score / max_score) * self._keyword_weight,
+                    chunk_id=chunk_id,
+                )
+            )
+        return results
+
+    def _dense_retrieve(self, query: str, candidate_k: int) -> list[ICRetrievalResult]:
         index = self._ensure_index()
-        candidate_k = max(1, top_k, self._retrieval_candidate_k)
         retriever = index.as_retriever(similarity_top_k=candidate_k)
         nodes = retriever.retrieve(query)
 
@@ -370,10 +505,76 @@ class ICRAGRetriever:
                     content=text,
                     source=source,
                     page=page,
-                    score=score,
+                    score=score * self._dense_weight,
                     chunk_id=chunk_id,
                 )
             )
+        return results
+
+    def _merge_hybrid_results(
+        self,
+        dense_results: list[ICRetrievalResult],
+        keyword_results: list[ICRetrievalResult],
+    ) -> list[ICRetrievalResult]:
+        merged: dict[tuple[str, str, str], ICRetrievalResult] = {}
+        route_counts: dict[tuple[str, str, str], int] = {}
+
+        for item in [*dense_results, *keyword_results]:
+            key = _keyword_result_key(item)
+            prev = merged.get(key)
+            route_counts[key] = route_counts.get(key, 0) + 1
+            if prev is None:
+                merged[key] = item.model_copy(deep=True)
+                continue
+
+            combined_score = max(float(prev.score or 0.0), float(item.score or 0.0))
+            if route_counts[key] > 1:
+                combined_score += 0.12
+            if len(item.content or "") > len(prev.content or ""):
+                prev.content = item.content
+            prev.score = combined_score
+
+        return sorted(
+            merged.values(),
+            key=lambda item: float(item.score or 0.0),
+            reverse=True,
+        )
+
+    def _run_reranker(
+        self,
+        query: str,
+        results: list[ICRetrievalResult],
+        top_k: int,
+    ) -> list[ICRetrievalResult]:
+        if self._reranker is None or len(results) <= 1:
+            return results[:top_k]
+
+        async def _rerank() -> list[ICRetrievalResult]:
+            return await self._reranker.rerank(query, results, top_k=top_k)
+
+        try:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(_rerank())
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(lambda: asyncio.run(_rerank()))
+                return future.result()
+        except Exception as exc:
+            logger.warning(f"CrossEncoder 重排序失败，回退 hybrid 排序: {exc}")
+            return results[:top_k]
+
+    def retrieve(self, query: str, top_k: int = 3) -> list[ICRetrievalResult]:
+        """执行 IC hybrid 检索并返回统一结构化结果。"""
+        candidate_k = max(1, top_k, self._retrieval_candidate_k)
+        dense_results = self._dense_retrieve(query, candidate_k)
+        keyword_results = (
+            self._keyword_retrieve(query, max(top_k, self._keyword_candidate_k))
+            if self._enable_keyword_retrieval
+            else []
+        )
+        results = self._merge_hybrid_results(dense_results, keyword_results)
 
         if not results:
             return []

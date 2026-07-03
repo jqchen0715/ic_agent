@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     data_path: str = Field(default="data", description="本地 PDF 知识库目录")
     chroma_path: str = Field(default="chroma_db", description="Chroma 持久化目录")
     chroma_collection_name: str = Field(default="ic_expert", description="Chroma 集合名")
-    embedding_model_path: str = Field(default="/Users/jiaqing/八股/ai-agent-interview-guide/ic_project/IC-Expert-agent/model/bge-m3", description="bge-m3")
+    embedding_model_path: str = Field(
+        default="/Users/jiaqing/八股/ai-agent-interview-guide/ic_project/IC-Expert-agent/model/bge-m3",
+        description="bge-m3",
+    )
     embedding_device: str = Field(default="cpu", description="cpu")
     source_mismatch_strategy: str = Field(
         default="rebuild",
@@ -50,6 +53,10 @@ class Settings(BaseSettings):
     )
     rag_enable_reranker: bool = Field(default=True, description="是否启用 RAG CrossEncoder 重排序")
     rag_retrieval_candidate_k: int = Field(default=20, description="RAG dense 检索候选池大小")
+    rag_enable_keyword_retrieval: bool = Field(default=True, description="是否启用 BM25/关键词召回")
+    rag_keyword_candidate_k: int = Field(default=20, description="RAG BM25/关键词召回候选池大小")
+    rag_dense_weight: float = Field(default=0.65, description="Hybrid 检索 dense 分数权重")
+    rag_keyword_weight: float = Field(default=0.55, description="Hybrid 检索关键词分数权重")
     rag_rerank_top_k: int = Field(default=10, description="RAG 重排序后保留数量")
     rag_reranker_model: str = Field(
         default="cross-encoder/bge-reranker-v2-m3",
