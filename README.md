@@ -9,6 +9,7 @@
 - IC 专业问答：支持 `/api/v1/chat` 非流式对话和 `/api/v1/chat/stream` SSE 流式对话。
 - LangGraph 工具路由：`pre_tool_router -> tool_executor -> answer_generator`。
 - IC RAG 检索：基于 LlamaIndex + Chroma，支持 dense + BM25/关键词 hybrid recall + reranker，返回 `source/page/chunk_id`。
+- IC 范围分类：规则高置信 fast-path + LLM 结构化 fallback，统一决定是否进入知识库检索。
 - 统一知识库构建：脚本构建、运行时自动建库、上传 PDF 增量入库共用 `KnowledgeBuilder`。
 - 页码证据链：PDF 按页加载，chunk metadata 中保留 `page/page_start/page_end`。
 - chunk 事实源一致：上传 PDF 后，数据库 `document_chunks` 与向量库 chunks 来自同一批入库对象。
@@ -224,6 +225,50 @@ RAG_RERANKER_DEVICE=cpu
 RAG_ENABLE_KEYWORD_RETRIEVAL=false
 ```
 
+### IC Scope Classifier
+
+普通问答和自主任务共用 `app/core/intent/domain_classifier.py`，避免两条链路各自维护不同的 IC 范围判断。
+
+分类器遵循以下约束：
+
+```text
+用户问题
+  -> 规则词表高置信命中 IC/Verilog
+  -> 直接进入 RAG
+
+规则不确定
+  -> 调用 LLM 做结构化分类
+
+LLM 只决定是否应该检索 IC 知识库
+  -> 不允许直接生成答案
+
+最终能不能回答
+  -> 由 RAG 检索证据和 evidence gate 决定
+```
+
+LLM fallback 只输出结构化 JSON：
+
+```json
+{
+  "in_scope": true,
+  "confidence": "medium",
+  "domain": "rtl_design",
+  "normalized_query": "IC/Verilog RTL 乘法器结构设计方法",
+  "reason": "问题涉及数字电路中的乘法器设计"
+}
+```
+
+分类结果只影响工具路由和检索 query。例如：
+
+```text
+怎么设计一个乘法器
+  -> rule / high / rtl_design
+  -> rag_query = IC/Verilog RTL 怎么设计一个乘法器
+  -> selected_tools = ["ic_rag_search"]
+```
+
+注意：`in_scope=true` 不代表可以直接回答。它只表示应该进入 IC 知识库检索；如果 RAG 没有检索到可引用证据，普通问答仍会严格拒答。
+
 ## Agent 主链路
 
 普通问答链路：
@@ -233,8 +278,12 @@ ChatRequest
   -> 读取短期/长期记忆
   -> LangGraphICAgent
   -> pre_tool_router
+     -> ICDomainClassifier
+     -> 规则命中或 LLM 分类后选择工具
   -> tool_executor
+     -> ic_rag_search
   -> answer_generator
+     -> evidence gate
   -> citation_rewriter
   -> 保存记忆
   -> ChatResponse / SSE events
@@ -245,6 +294,7 @@ ChatRequest
 ```text
 goal
   -> plan
+  -> ICDomainClassifier 确保 IC 目标包含知识库检索步骤
   -> execute tools/reasoning
   -> collect evidence/confidence/review_flags
   -> recover on failure
@@ -260,7 +310,9 @@ goal
 
 - 工具调用前校验参数 schema，缺参数或多余参数会被拒绝。
 - 工具输出统一归一化为审计记录。
+- LLM scope classifier 只做结构化分类，不允许直接回答用户问题。
 - RAG 未命中时严格拒答或标记 `needs_review`。
+- 普通问答只输出有检索证据支撑的答案；自主任务可以生成草案，但必须标记证据边界和复核风险。
 - SDC 模板会标记默认假设，例如模块名、时钟周期、IO delay 缺失。
 - Verilog 工具会返回规则命中的证据和风险标记。
 - 自主 Agent 遇到工具失败会降级恢复，但任务状态会变成 `needs_review`，不会伪装成完成。
@@ -302,6 +354,7 @@ Milvus 不可用时，长期记忆会回退到本地 JSONL 关键词召回。
 - `app/api/routes/agent.py`：强自主 Agent 任务入口。
 - `app/core/agent/langgraph_agent.py`：普通问答 Agent 状态图。
 - `app/core/agent/autonomous.py`：强自主 Agent 计划、执行、恢复、反思和审计。
+- `app/core/intent/domain_classifier.py`：IC/Verilog 范围分类，规则 fast-path + LLM fallback。
 - `app/core/memory`：JSONL 短期记忆、JSONL 长期关键词召回、可选 Milvus 长期记忆和记忆管理器。
 - `app/core/rag`：统一知识库构建、dense/BM25 hybrid 检索、rerank 和引用治理。
 - `app/core/tools`：工具注册、参数校验、审计归一化和 IC 工具实现。
@@ -324,6 +377,7 @@ project-python/
 │   │   └── health.py
 │   ├── core/
 │   │   ├── agent/
+│   │   ├── intent/
 │   │   ├── memory/
 │   │   ├── rag/
 │   │   └── tools/
