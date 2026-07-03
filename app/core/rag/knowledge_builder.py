@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -79,8 +80,18 @@ class KnowledgeBuilder:
             chunk_overlap=chunk_overlap,
         )
 
-    def pdf_files(self) -> list[Path]:
+    def pdf_files(self, pdf_paths: Sequence[str | Path] | None = None) -> list[Path]:
         """返回参与建库的 PDF 文件列表。"""
+        if pdf_paths is not None:
+            files = [Path(path).resolve() for path in pdf_paths]
+            missing = [str(path) for path in files if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(f"PDF 文件不存在: {missing}")
+            pdf_files = sorted(path for path in files if path.suffix.lower() == ".pdf")
+            if not pdf_files:
+                raise FileNotFoundError(f"未找到 PDF 文件: {files}")
+            return pdf_files
+
         if not self.data_dir.exists():
             raise FileNotFoundError(f"数据目录不存在: {self.data_dir}")
 
@@ -89,19 +100,20 @@ class KnowledgeBuilder:
             raise FileNotFoundError(f"数据目录下未找到 PDF: {self.data_dir}")
         return pdf_files
 
-    def load_documents(self) -> list[Any]:
+    def load_documents(self, pdf_paths: Sequence[str | Path] | None = None) -> list[Any]:
         """加载 PDF 并生成带统一 metadata 的 LlamaIndex Document。"""
-        from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+        from langchain_community.document_loaders import PyPDFLoader
         from llama_index.core import Document
 
-        pdf_files = self.pdf_files()
+        pdf_files = self.pdf_files(pdf_paths)
         file_hashes = {
             path.name: hashlib.sha256(path.read_bytes()).hexdigest()[:16]
             for path in pdf_files
         }
 
-        loader = DirectoryLoader(str(self.data_dir), glob="*.pdf", loader_cls=PyPDFLoader)
-        lc_docs = loader.load()
+        lc_docs = []
+        for pdf_file in pdf_files:
+            lc_docs.extend(PyPDFLoader(str(pdf_file)).load())
         split_docs = self._splitter.split_documents(lc_docs)
 
         documents: list[Any] = []
@@ -127,16 +139,17 @@ class KnowledgeBuilder:
 
             chunk_counts_by_source[source] = chunk_counts_by_source.get(source, 0) + 1
             chunk_index = chunk_counts_by_source[source]
+            chunk_id = (
+                f"{source}#p{page_num if page_num is not None else 'unknown'}"
+                f"#c{chunk_index}"
+            )
             metadata.update(
                 {
                     "source": source,
                     "file_name": source,
                     "file_path": str(source_path),
                     "file_hash": file_hashes.get(source, ""),
-                    "chunk_id": (
-                        f"{source}#p{page_num if page_num is not None else 'unknown'}"
-                        f"#c{chunk_index}"
-                    ),
+                    "chunk_id": chunk_id,
                     "chunk_index": chunk_index,
                     "chunk_strategy": "ic_custom",
                 }
@@ -146,12 +159,45 @@ class KnowledgeBuilder:
                 metadata["page_start"] = page_num
                 metadata["page_end"] = page_num
 
-            documents.append(Document(text=text, metadata=metadata))
+            documents.append(Document(text=text, metadata=metadata, id_=chunk_id))
 
         if not documents:
             raise RuntimeError("未生成任何知识库切片")
 
         return documents
+
+    @staticmethod
+    def _matching_chunk_ids(collection: Any, field: str, value: str) -> set[str]:
+        """返回符合单个 metadata 条件的 chunk ids。"""
+        if not value:
+            return set()
+
+        try:
+            data = collection.get(where={field: value}, include=["metadatas"])
+        except Exception:
+            return set()
+
+        return {str(item) for item in data.get("ids", []) if item}
+
+    def _delete_pdf_chunks(self, collection: Any, pdf_path: Path) -> int:
+        """删除某个 PDF 在 collection 中已有的 chunks。"""
+        source = pdf_path.name
+        candidates = {
+            ("source", source),
+            ("source", str(pdf_path)),
+            ("source", str(pdf_path.resolve())),
+            ("file_name", source),
+            ("file_path", str(pdf_path)),
+            ("file_path", str(pdf_path.resolve())),
+        }
+        ids: set[str] = set()
+        for field, value in candidates:
+            ids.update(self._matching_chunk_ids(collection, field, value))
+        if not ids:
+            return 0
+
+        collection.delete(ids=sorted(ids))
+        return len(ids)
 
     def build_index(
         self,
@@ -190,6 +236,43 @@ class KnowledgeBuilder:
             index=index,
             document_count=len(documents),
             pdf_count=pdf_count,
+            collection_name=self.collection_name,
+            chroma_path=self.chroma_path,
+        )
+
+    def index_pdf(
+        self,
+        chroma_client: Any,
+        pdf_path: str | Path,
+        *,
+        show_progress: bool = True,
+    ) -> KnowledgeBuildResult:
+        """增量更新单个 PDF：删除该文件旧 chunks，然后写入新 chunks。"""
+        from llama_index.core import StorageContext, VectorStoreIndex
+        from llama_index.vector_stores.chroma import ChromaVectorStore
+
+        pdf = Path(pdf_path).resolve()
+        documents = self.load_documents([pdf])
+        collection = chroma_client.get_or_create_collection(self.collection_name)
+        deleted = self._delete_pdf_chunks(collection, pdf)
+
+        vector_store = ChromaVectorStore(chroma_collection=collection)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+        logger.info(
+            f"开始增量更新知识库: pdf={pdf.name} deleted_chunks={deleted} "
+            f"new_chunks={len(documents)} collection={self.collection_name}"
+        )
+        index = VectorStoreIndex.from_documents(
+            documents,
+            storage_context=storage_context,
+            embed_model=self.embed_model,
+            show_progress=show_progress,
+        )
+        return KnowledgeBuildResult(
+            index=index,
+            document_count=len(documents),
+            pdf_count=1,
             collection_name=self.collection_name,
             chroma_path=self.chroma_path,
         )

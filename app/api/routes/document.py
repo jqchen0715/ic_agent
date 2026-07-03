@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """文档管理 API：上传与列表。"""
 
 from __future__ import annotations
@@ -15,8 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.rag.retriever import ICRAGRetriever
-from app.etl.chunker import ChunkStrategy
 from app.etl import ETLPipeline
+from app.etl.chunker import ChunkStrategy
 from app.infrastructure.database.models import Document, DocumentChunk
 from app.infrastructure.database.session import get_async_session
 from app.models.schemas import DocumentInfo, DocumentUploadResponse
@@ -37,7 +36,7 @@ def _sync_pdf_to_data_dir(uploaded_path: Path, filename: str, doc_id: str) -> Pa
     return target
 
 
-def _rebuild_chroma_index() -> str:
+def _index_pdf_in_chroma(pdf_path: Path) -> str:
     settings = get_settings()
     retriever = ICRAGRetriever(
         data_dir=settings.data_path,
@@ -47,9 +46,9 @@ def _rebuild_chroma_index() -> str:
         embedding_device=settings.embedding_device,
         mismatch_strategy=settings.source_mismatch_strategy,
     )
-    report = retriever.rebuild_index()
+    report = retriever.index_pdf(pdf_path)
     if report is None:
-        return "rebuild_done"
+        return "indexed"
     return report.reason
 
 
@@ -93,7 +92,7 @@ async def upload_document(
         try:
             synced = await asyncio.to_thread(_sync_pdf_to_data_dir, dest, safe_name, doc_id)
             data_synced_path = str(synced)
-            vector_message = await asyncio.to_thread(_rebuild_chroma_index)
+            vector_message = await asyncio.to_thread(_index_pdf_in_chroma, synced)
             vector_status = "indexed"
         except Exception as exc:
             logger.exception("向量入库失败: {}", exc)

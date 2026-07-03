@@ -235,6 +235,16 @@ class ICRAGRetriever:
         )
         return result.index
 
+    def _new_builder(self) -> KnowledgeBuilder:
+        return KnowledgeBuilder(
+            data_dir=self._data_dir,
+            chroma_path=self._chroma_path,
+            collection_name=self._collection_name,
+            embed_model=self._embed_model,
+            chunk_size=self._chunk_size,
+            chunk_overlap=self._chunk_overlap,
+        )
+
     def _ensure_index(self) -> VectorStoreIndex:
         if self._index is not None:
             return self._index
@@ -274,10 +284,27 @@ class ICRAGRetriever:
         return self._index
 
     def rebuild_index(self) -> SourceConsistencyReport | None:
-        """强制重建 Chroma 索引（用于上传新文档后立即可检索）。"""
+        """强制重建 Chroma 索引（用于手动修复/全量刷新）。"""
         self._chroma_path.mkdir(parents=True, exist_ok=True)
         chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
         self._index = self._build_index(chroma_client, recreate_collection=True)
+        try:
+            collection = chroma_client.get_collection(self._collection_name)
+            self._consistency_report = self._check_source_consistency(collection)
+        except Exception:
+            self._consistency_report = None
+        return self._consistency_report
+
+    def index_pdf(self, pdf_path: str | Path) -> SourceConsistencyReport | None:
+        """增量更新单个 PDF 到 Chroma（用于上传后立即可检索）。"""
+        self._chroma_path.mkdir(parents=True, exist_ok=True)
+        chroma_client = chromadb.PersistentClient(path=str(self._chroma_path))
+        result = self._new_builder().index_pdf(
+            chroma_client,
+            pdf_path,
+            show_progress=True,
+        )
+        self._index = result.index
         try:
             collection = chroma_client.get_collection(self._collection_name)
             self._consistency_report = self._check_source_consistency(collection)
