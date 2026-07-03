@@ -143,6 +143,8 @@ class KnowledgeBuilder:
             )
             if page_num is not None:
                 metadata["page"] = page_num
+                metadata["page_start"] = page_num
+                metadata["page_end"] = page_num
 
             documents.append(Document(text=text, metadata=metadata))
 
