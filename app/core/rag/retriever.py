@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """IC 检索：LlamaIndex + Chroma，含 source 一致性检查与结构化输出。"""
 
 from __future__ import annotations
@@ -11,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
-from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
-from llama_index.core import Document, StorageContext, VectorStoreIndex
+from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
+
 try:
     from loguru import logger
 except Exception:
@@ -23,8 +22,12 @@ except Exception:
 
     logger = logging.getLogger(__name__)
 
+from app.core.rag.knowledge_builder import (
+    KnowledgeBuilder,
+    first_present,
+    normalize_page_number,
+)
 from app.core.rag.reranker import Reranker
-from app.etl.ic_text_splitter import ICCustomTextSplitter
 from app.models.schemas import ICRetrievalResult
 
 
@@ -45,25 +48,14 @@ def _normalize_source_name(name: str) -> str:
 
 
 def _normalize_page_number(metadata: dict[str, Any]) -> int | None:
-    raw = (
-        metadata.get("page")
-        or metadata.get("page_number")
-        or metadata.get("page_num")
-        or metadata.get("page_index")
+    return normalize_page_number(
+        first_present(
+            metadata.get("page"),
+            metadata.get("page_number"),
+            metadata.get("page_num"),
+            metadata.get("page_index"),
+        )
     )
-
-    if isinstance(raw, int):
-        if raw < 0:
-            return None
-        return raw + 1 if raw == 0 else raw
-
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text.isdigit():
-            num = int(text)
-            return num + 1 if num == 0 else num
-
-    return None
 
 
 def _page_label(metadata: dict[str, Any]) -> str:
@@ -115,13 +107,17 @@ class ICRAGRetriever:
     ) -> None:
         base_dir = Path.cwd()
 
-        self._data_dir = (Path(data_dir) if data_dir else base_dir / os.getenv("DATA_PATH", "data")).resolve()
+        self._data_dir = (
+            Path(data_dir) if data_dir else base_dir / os.getenv("DATA_PATH", "data")
+        ).resolve()
         self._chroma_path = (
             Path(chroma_path) if chroma_path else base_dir / os.getenv("CHROMA_PATH", "chroma_db")
         ).resolve()
 
         self._collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME", "ic_expert")
-        self._mismatch_strategy = (mismatch_strategy or os.getenv("SOURCE_MISMATCH_STRATEGY", "rebuild")).lower()
+        self._mismatch_strategy = (
+            mismatch_strategy or os.getenv("SOURCE_MISMATCH_STRATEGY", "rebuild")
+        ).lower()
         if self._mismatch_strategy not in {"warn", "rebuild"}:
             self._mismatch_strategy = "rebuild"
 
@@ -130,13 +126,21 @@ class ICRAGRetriever:
         model_name = str(model_path.resolve()) if model_path.exists() else str(model_env)
 
         self._embedding_device = embedding_device or os.getenv("EMBEDDING_DEVICE", "cpu")
-        self._embed_model = HuggingFaceEmbedding(model_name=model_name, device=self._embedding_device)
+        self._embed_model = HuggingFaceEmbedding(
+            model_name=model_name,
+            device=self._embedding_device,
+        )
 
-        self._splitter = ICCustomTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self._chunk_size = chunk_size
+        self._chunk_overlap = chunk_overlap
         self._enable_reranker = enable_reranker
         self._retrieval_candidate_k = max(1, retrieval_candidate_k)
         self._rerank_top_k = max(1, rerank_top_k)
-        self._reranker = Reranker(model_name=reranker_model, device=reranker_device) if enable_reranker else None
+        self._reranker = (
+            Reranker(model_name=reranker_model, device=reranker_device)
+            if enable_reranker
+            else None
+        )
         self._index: VectorStoreIndex | None = None
         self._consistency_report: SourceConsistencyReport | None = None
 
@@ -211,59 +215,25 @@ class ICRAGRetriever:
             actual_sources=actual,
         )
 
-    def _load_pdf_documents(self) -> list[Document]:
-        if not self._data_dir.exists():
-            raise FileNotFoundError(f"数据目录不存在: {self._data_dir}")
-
-        pdf_files = sorted(self._data_dir.glob("*.pdf"))
-        if not pdf_files:
-            raise FileNotFoundError(f"数据目录下未找到 PDF: {self._data_dir}")
-
-        loader = DirectoryLoader(str(self._data_dir), glob="*.pdf", loader_cls=PyPDFLoader)
-        lc_docs = loader.load()
-        split_docs = self._splitter.split_documents(lc_docs)
-
-        docs: list[Document] = []
-        for idx, doc in enumerate(split_docs, 1):
-            metadata = dict(doc.metadata or {})
-            source = Path(str(metadata.get("source") or metadata.get("file_path") or "unknown")).name
-            metadata["source"] = source
-
-            page_num = _normalize_page_number(metadata)
-            if page_num is not None:
-                metadata["page"] = page_num
-
-            chunk_id = f"{source}#p{page_num if page_num is not None else 'unknown'}#c{idx}"
-            metadata["chunk_id"] = chunk_id
-
-            docs.append(Document(text=doc.page_content, metadata=metadata))
-
-        return docs
-
     def _load_index_from_collection(self, collection: Any) -> VectorStoreIndex:
         vector_store = ChromaVectorStore(chroma_collection=collection)
         return VectorStoreIndex.from_vector_store(vector_store, embed_model=self._embed_model)
 
     def _build_index(self, chroma_client: Any, recreate_collection: bool) -> VectorStoreIndex:
-        if recreate_collection:
-            try:
-                chroma_client.delete_collection(self._collection_name)
-            except Exception:
-                pass
-
-        collection = chroma_client.get_or_create_collection(self._collection_name)
-        vector_store = ChromaVectorStore(chroma_collection=collection)
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
-
-        docs = self._load_pdf_documents()
-        logger.info(f"开始重建索引: docs={len(docs)} collection={self._collection_name}")
-
-        return VectorStoreIndex.from_documents(
-            docs,
-            storage_context=storage_context,
+        builder = KnowledgeBuilder(
+            data_dir=self._data_dir,
+            chroma_path=self._chroma_path,
+            collection_name=self._collection_name,
             embed_model=self._embed_model,
+            chunk_size=self._chunk_size,
+            chunk_overlap=self._chunk_overlap,
+        )
+        result = builder.build_index(
+            chroma_client,
+            recreate_collection=recreate_collection,
             show_progress=True,
         )
+        return result.index
 
     def _ensure_index(self) -> VectorStoreIndex:
         if self._index is not None:
@@ -315,7 +285,12 @@ class ICRAGRetriever:
             self._consistency_report = None
         return self._consistency_report
 
-    def _run_reranker(self, query: str, results: list[ICRetrievalResult], top_k: int) -> list[ICRetrievalResult]:
+    def _run_reranker(
+        self,
+        query: str,
+        results: list[ICRetrievalResult],
+        top_k: int,
+    ) -> list[ICRetrievalResult]:
         if self._reranker is None or len(results) <= 1:
             return results[:top_k]
 
@@ -351,7 +326,9 @@ class ICRAGRetriever:
             node = getattr(item, "node", None)
             metadata = dict(getattr(node, "metadata", {}) or {})
 
-            source = Path(str(metadata.get("source") or metadata.get("file_name") or "unknown")).name
+            source = Path(
+                str(metadata.get("source") or metadata.get("file_name") or "unknown")
+            ).name
             page = _page_label(metadata)
             score = float(item.score or 0.0)
             chunk_id = str(
@@ -374,7 +351,11 @@ class ICRAGRetriever:
             return []
 
         rerank_top_k = min(max(top_k, self._rerank_top_k), len(results))
-        reranked = self._run_reranker(query, results, rerank_top_k) if self._enable_reranker else results
+        reranked = (
+            self._run_reranker(query, results, rerank_top_k)
+            if self._enable_reranker
+            else results
+        )
         return reranked[:top_k]
 
 

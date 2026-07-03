@@ -1,7 +1,18 @@
-# -*- coding: utf-8 -*-
 """RAG 子系统：检索、重排、生成。"""
 
 from app.core.rag.citation_rewriter import CitationRewriteResult, rewrite_answer_citations
+
+try:  # pragma: no cover - 可选依赖缺失时保持最小可用导入
+    from app.core.rag.knowledge_builder import (
+        KnowledgeBuilder,
+        KnowledgeBuildResult,
+        normalize_page_number,
+    )
+except Exception:  # noqa: BLE001
+    KnowledgeBuilder = None  # type: ignore[assignment]
+    KnowledgeBuildResult = None  # type: ignore[assignment]
+    normalize_page_number = None  # type: ignore[assignment]
+
 try:  # pragma: no cover - 可选依赖缺失时保持最小可用导入
     from app.core.rag.retriever import ICRAGRetriever, MultiRetriever, SourceConsistencyReport
 except Exception:  # noqa: BLE001
@@ -23,6 +34,9 @@ __all__ = [
     "ICRAGRetriever",
     "MultiRetriever",
     "SourceConsistencyReport",
+    "KnowledgeBuilder",
+    "KnowledgeBuildResult",
+    "normalize_page_number",
     "CitationRewriteResult",
     "rewrite_answer_citations",
     "Reranker",
