@@ -160,6 +160,7 @@ async function runAutonomousTask(goal) {
     status: "running",
     goal,
     steps: [],
+    answer_mode: "assisted_draft",
     final_answer: "",
     reflection: {},
   };
@@ -187,6 +188,7 @@ async function runAutonomousTask(goal) {
       status: "failed",
       goal,
       steps: [],
+      answer_mode: "refusal",
       final_answer: `自主任务失败：${error.message || error}`,
       reflection: {},
     };
@@ -382,6 +384,8 @@ function renderTask() {
   const audit = task.audit_summary || {};
   const steps = Array.isArray(task.steps) ? task.steps : [];
   const statusClass = task.status === "failed" || task.status === "needs_review" ? "error" : "";
+  const mode = task.answer_mode || "assisted_draft";
+  const modeClass = mode === "strict_answer" ? "" : "error";
   els.taskOutput.innerHTML = `
     <article class="task-card">
       <div class="task-card-header">
@@ -399,13 +403,13 @@ function renderTask() {
     <article class="task-card">
       <div class="task-card-header">
         <h3>最终交付</h3>
-        <span class="badge ${task.confidence === "low" ? "error" : ""}">
-          ${escapeHtml(`${task.confidence || "unknown"} · ${reflection.quality_score ?? "NA"}`)}
+        <span class="badge ${modeClass}">
+          ${escapeHtml(formatAnswerMode(mode))}
         </span>
       </div>
       <div class="task-card-body">
         <div class="audit-line">
-          ${escapeHtml(formatAuditSummary(audit, task.review_flags))}
+          ${escapeHtml(`${task.confidence || "unknown"} · ${reflection.quality_score ?? "NA"} · ${formatAuditSummary(audit, task.review_flags)}`)}
         </div>
         <div class="final-answer">${escapeHtml(task.final_answer || "等待执行完成")}</div>
       </div>
@@ -466,6 +470,12 @@ function formatAuditSummary(audit, flags) {
     parts.push(`复核 ${reviewFlags.join(", ")}`);
   }
   return parts.join(" · ");
+}
+
+function formatAnswerMode(mode) {
+  if (mode === "strict_answer") return "Evidence Answer";
+  if (mode === "refusal") return "Refusal";
+  return "Assisted Draft · 需人工复核";
 }
 
 function renderSuggestionList(items) {

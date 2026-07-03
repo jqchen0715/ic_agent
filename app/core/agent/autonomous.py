@@ -136,11 +136,43 @@ class AutonomousAgent:
             finally:
                 step.finished_at = _now()
 
-        task.final_answer = await self._finalize(goal, task.steps, model_preference)
-        task.reflection = await self._reflect(goal, task.final_answer, task.steps, model_preference)
         task.audit_summary = self._build_audit_summary(task.steps)
         task.review_flags = list(task.audit_summary.get("review_flags", []))
         task.confidence = str(task.audit_summary.get("confidence", "unknown"))
+        task.answer_mode = self._derive_answer_mode(task.audit_summary)
+        sections = self._build_answer_sections(goal, task.steps, task.audit_summary, task.answer_mode)
+        task.evidence_supported = sections["evidence_supported"]
+        task.draft_suggestions = sections["draft_suggestions"]
+        task.missing_evidence = sections["missing_evidence"]
+        task.next_actions = sections["next_actions"]
+        task.final_answer = await self._finalize(
+            goal,
+            task.steps,
+            model_preference,
+            audit_summary=task.audit_summary,
+            answer_mode=task.answer_mode,
+            sections=sections,
+        )
+        task.reflection = await self._reflect(goal, task.final_answer, task.steps, model_preference)
+        if task.answer_mode == "strict_answer" and self._reflection_requires_review(task.reflection):
+            task.answer_mode = "assisted_draft"
+            task.review_flags = sorted(set([*task.review_flags, "reflection_requires_review"]))
+            task.audit_summary["review_flags"] = task.review_flags
+            task.audit_summary["confidence"] = "low"
+            task.confidence = "low"
+            sections = self._build_answer_sections(goal, task.steps, task.audit_summary, task.answer_mode)
+            task.evidence_supported = sections["evidence_supported"]
+            task.draft_suggestions = sections["draft_suggestions"]
+            task.missing_evidence = sections["missing_evidence"]
+            task.next_actions = sections["next_actions"]
+            task.final_answer = await self._finalize(
+                goal,
+                task.steps,
+                model_preference,
+                audit_summary=task.audit_summary,
+                answer_mode=task.answer_mode,
+                sections=sections,
+            )
         task.status = self._derive_status(task)
         task.updated_at = _now()
 
@@ -368,20 +400,35 @@ class AutonomousAgent:
         goal: str,
         steps: list[AutonomousTaskStep],
         model_preference: str | None,
+        *,
+        audit_summary: dict[str, Any],
+        answer_mode: str,
+        sections: dict[str, list[str]],
     ) -> str:
         context = _steps_context(steps, max_len=14000)
+        section_context = json.dumps(sections, ensure_ascii=False, indent=2)
+        audit_context = json.dumps(audit_summary, ensure_ascii=False, indent=2)
         try:
             resp = await self._model_router.chat(
                 [
                     {
                         "role": "system",
                         "content": (
-                            "你是强自主 Agent 的最终交付器。输出应包含: 结论、执行过程、"
-                            "可采纳建议、风险/证据边界、下一步。不要编造未观察到的来源。"
-                            "若 review_flags 或 low confidence 存在，必须明确建议人工复核。"
+                            "你是 IC/Verilog 自主任务的最终交付器。必须严格按以下四个二级标题输出: "
+                            "证据支持、草案建议、缺失证据、下一步。"
+                            "answer_mode=strict_answer 时，只能把工具证据支持的内容写成确定表述。"
+                            "answer_mode=assisted_draft 时，必须说明这是需人工复核的辅助草案，"
+                            "不得把无证据内容写成确定结论。answer_mode=refusal 时，只说明无法交付和需要补充什么。"
+                            "不要编造未观察到的来源、页码、工具结果或知识库证据。"
                         ),
                     },
-                    {"role": "user", "content": f"目标:\n{goal}\n\n执行记录:\n{context}"},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"目标:\n{goal}\n\nanswer_mode:\n{answer_mode}\n\n审计摘要:\n"
+                            f"{audit_context}\n\n结构化交付要点:\n{section_context}\n\n执行记录:\n{context}"
+                        ),
+                    },
                 ],
                 model_preference=model_preference,
                 temperature=0.2,
@@ -392,7 +439,33 @@ class AutonomousAgent:
         except Exception as exc:  # noqa: BLE001
             logger.warning("自主 Agent 最终汇总降级: {}", exc)
 
-        lines = ["# 自主任务执行结果", "", f"目标: {goal}", "", "## 执行轨迹"]
+        return self._render_structured_final_answer(goal, answer_mode, sections, audit_summary, steps)
+
+    def _render_structured_final_answer(
+        self,
+        goal: str,
+        answer_mode: str,
+        sections: dict[str, list[str]],
+        audit_summary: dict[str, Any],
+        steps: list[AutonomousTaskStep],
+    ) -> str:
+        lines = [
+            "# 自主任务执行结果",
+            "",
+            f"目标: {goal}",
+            f"模式: {answer_mode}",
+            f"置信度: {audit_summary.get('confidence', 'unknown')}",
+            "",
+            "## 证据支持",
+        ]
+        lines.extend(_format_bullets(sections.get("evidence_supported") or ["无可引用工具证据。"]))
+        lines.extend(["", "## 草案建议"])
+        lines.extend(_format_bullets(sections.get("draft_suggestions") or ["暂无可安全交付的草案建议。"]))
+        lines.extend(["", "## 缺失证据"])
+        lines.extend(_format_bullets(sections.get("missing_evidence") or ["暂无额外缺失证据。"]))
+        lines.extend(["", "## 下一步"])
+        lines.extend(_format_bullets(sections.get("next_actions") or ["补充输入或修复依赖后重新运行。"]))
+        lines.extend(["", "## 执行轨迹"])
         for step in steps:
             status = "完成" if step.status == "completed" else "失败"
             lines.append(f"- {step.title}: {status}")
@@ -403,27 +476,6 @@ class AutonomousAgent:
                 lines.append(f"  - 证据数: {len(step.evidence)}")
             if step.error:
                 lines.append(f"  - 边界: {step.error}")
-        lines.append("")
-        lines.append("## 关键观察")
-        for step in steps:
-            observation = (step.observation or "").strip()
-            if not observation:
-                continue
-            clipped = observation[:1200] + ("..." if len(observation) > 1200 else "")
-            lines.append(f"### {step.title}")
-            lines.append(clipped)
-            lines.append("")
-        lines.extend(
-            [
-                "## 结论",
-                "Agent 已按计划完成可用步骤。带 low confidence、工具失败或复核标记的内容不能直接视为最终事实，"
-                "需要人工确认或修复依赖后重新运行。",
-                "",
-                "## 下一步",
-                "- 若需要知识库证据，请确认 embedding 模型路径和 Chroma 数据库可用。",
-                "- 若需要更精确 SDC，请补充模块端口、时钟周期、复位、IO 延迟和多周期/伪路径约束背景。",
-            ]
-        )
         return "\n".join(lines)
 
     async def _reflect(
@@ -476,16 +528,148 @@ class AutonomousAgent:
             return "needs_review"
         return "completed"
 
+    def _derive_answer_mode(self, audit_summary: dict[str, Any]) -> str:
+        evidence_count = _safe_int(audit_summary.get("evidence_count"))
+        failed_count = _safe_int(audit_summary.get("failed_step_count"))
+        confidence = str(audit_summary.get("confidence", "unknown")).lower()
+        review_flags = _as_str_list(audit_summary.get("review_flags"))
+        if failed_count and not evidence_count:
+            return "refusal"
+        if evidence_count and not review_flags and confidence in {"high", "medium"}:
+            return "strict_answer"
+        return "assisted_draft"
+
+    def _reflection_requires_review(self, reflection: dict[str, Any]) -> bool:
+        if reflection.get("likely_hallucination"):
+            return True
+        if _safe_int(reflection.get("quality_score", 100)) < 60:
+            return True
+        return bool(reflection.get("parse_error"))
+
+    def _build_answer_sections(
+        self,
+        goal: str,
+        steps: list[AutonomousTaskStep],
+        audit_summary: dict[str, Any],
+        answer_mode: str,
+    ) -> dict[str, list[str]]:
+        evidence_supported = self._collect_evidence_supported(steps)
+        review_flags = _as_str_list(audit_summary.get("review_flags"))
+        missing_evidence = self._missing_evidence_items(review_flags, steps, evidence_supported)
+        next_actions = self._next_action_items(goal, review_flags, answer_mode)
+
+        if answer_mode == "strict_answer":
+            draft_suggestions = self._collect_tool_suggestions(steps)
+            if not draft_suggestions:
+                draft_suggestions = ["基于已命中的工具证据整理结论；若用于面试或设计评审，仍建议核对原始文档页码。"]
+        elif answer_mode == "refusal":
+            draft_suggestions = ["当前任务没有形成可交付草案；需要先修复失败步骤或补充输入。"]
+        else:
+            draft_suggestions = self._collect_draft_suggestions(steps)
+            if not draft_suggestions:
+                draft_suggestions = [
+                    "这是辅助草案，不是知识库证据支持的确定答案。",
+                    "先明确目标规格、输入输出约束、性能目标和已有设计材料，再重新触发检索与工具审查。",
+                ]
+
+        if not evidence_supported:
+            evidence_supported = ["无可引用工具证据；以下内容只能作为需人工复核的辅助草案。"]
+
+        return {
+            "evidence_supported": evidence_supported[:8],
+            "draft_suggestions": draft_suggestions[:8],
+            "missing_evidence": missing_evidence[:8],
+            "next_actions": next_actions[:8],
+        }
+
+    def _collect_evidence_supported(self, steps: list[AutonomousTaskStep]) -> list[str]:
+        items: list[str] = []
+        for step in steps:
+            for evidence in step.evidence:
+                content = str(evidence.get("content") or evidence.get("summary") or "").strip()
+                if not content:
+                    continue
+                source = str(evidence.get("source") or "").strip()
+                page = evidence.get("page")
+                ref = f"（{source} 第{page}页）" if source and page not in (None, "", "未知") else ""
+                items.append(f"{step.title}: {_clip(content, 220)}{ref}")
+        return items
+
+    def _collect_tool_suggestions(self, steps: list[AutonomousTaskStep]) -> list[str]:
+        items: list[str] = []
+        for step in steps:
+            if step.action_type != "tool" or not step.observation or step.review_flags:
+                continue
+            items.append(f"{step.title}: {_clip(step.observation, 260)}")
+        return items
+
+    def _collect_draft_suggestions(self, steps: list[AutonomousTaskStep]) -> list[str]:
+        items: list[str] = []
+        for step in steps:
+            observation = (step.observation or "").strip()
+            if not observation:
+                continue
+            if step.evidence and not step.review_flags:
+                continue
+            label = "工具观察" if step.action_type == "tool" else "推理草案"
+            items.append(f"{label} - {step.title}: {_clip(observation, 260)}")
+        return items
+
+    def _missing_evidence_items(
+        self,
+        review_flags: list[str],
+        steps: list[AutonomousTaskStep],
+        evidence_supported: list[str],
+    ) -> list[str]:
+        items: list[str] = []
+        if not evidence_supported:
+            items.append("当前没有可引用知识库片段或工具证据。")
+        for flag in review_flags:
+            if flag == "rag_step_without_evidence":
+                items.append("RAG 检索步骤没有返回可引用证据。")
+            elif flag in {"rag_no_results", "rag_weak_evidence"}:
+                items.append("知识库检索结果为空或相关性不足。")
+            elif flag == "reasoning_without_tool_evidence":
+                items.append("部分步骤依赖模型推理，未绑定工具证据。")
+            elif flag == "recovered_with_reasoning":
+                items.append("有步骤从工具失败降级为推理恢复。")
+            elif flag.endswith("_error") or flag == "tool_execution_failed":
+                items.append(f"工具执行存在失败标记: {flag}。")
+            elif flag == "reflection_requires_review":
+                items.append("反思审查未通过或不可用，最终交付需要人工复核。")
+            else:
+                items.append(f"复核标记: {flag}。")
+        for step in steps:
+            if step.error:
+                items.append(f"{step.title} 失败或异常: {_clip(step.error, 180)}")
+        return sorted(set(items)) or ["暂无额外缺失证据。"]
+
+    def _next_action_items(self, goal: str, review_flags: list[str], answer_mode: str) -> list[str]:
+        items: list[str] = []
+        if answer_mode != "strict_answer":
+            items.append("把草案内容当作待复核工作单，不要直接当作最终答案。")
+        if "rag_step_without_evidence" in review_flags or "rag_no_results" in review_flags:
+            items.append("补充或重建相关 IC/Verilog PDF 知识库后重新运行检索。")
+        if any(flag.endswith("_error") or flag == "tool_execution_failed" for flag in review_flags):
+            items.append("先修复失败工具依赖，再重新执行自主任务。")
+        if any(token in goal for token in ("乘法器", "加法器", "FIFO", "状态机", "时序", "约束")):
+            items.append("补充位宽、时钟周期、延迟目标、面积/功耗约束和目标平台。")
+        items.append("将最终结论回到普通问答或检索证据链中复核。")
+        return items
+
     def _build_audit_summary(self, steps: list[AutonomousTaskStep]) -> dict[str, Any]:
         flags: list[str] = []
         tool_steps = [step for step in steps if step.action_type == "tool"]
         evidence_count = 0
         low_confidence = 0
+        failed_count = 0
         for step in steps:
             flags.extend(step.review_flags)
             evidence_count += len(step.evidence)
             if step.confidence in {"low", "unknown"}:
                 low_confidence += 1
+            if step.status == "failed":
+                failed_count += 1
 
         for step in tool_steps:
             if not step.evidence and step.tool_name == "ic_rag_search":
@@ -511,6 +695,7 @@ class AutonomousAgent:
             "evidence_count": evidence_count,
             "tool_step_count": len(tool_steps),
             "low_confidence_step_count": low_confidence,
+            "failed_step_count": failed_count,
         }
 
     async def _remember(
@@ -613,6 +798,24 @@ def _normalize_confidence(value: Any) -> str:
     if confidence in {"high", "medium", "low", "unknown"}:
         return confidence
     return "unknown"
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clip(text: str, max_len: int) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "..."
+
+
+def _format_bullets(items: list[str]) -> list[str]:
+    return [f"- {item}" for item in items if item.strip()]
 
 
 def _steps_context(steps: list[AutonomousTaskStep], max_len: int = 10000) -> str:

@@ -83,6 +83,14 @@ class AutonomousTask(BaseModel):
     created_at: str
     updated_at: str
     steps: list[AutonomousTaskStep] = Field(default_factory=list)
+    answer_mode: str = Field(
+        default="assisted_draft",
+        description="strict_answer | assisted_draft | refusal",
+    )
+    evidence_supported: list[str] = Field(default_factory=list, description="有工具证据支撑的结论")
+    draft_suggestions: list[str] = Field(default_factory=list, description="需人工复核的草案建议")
+    missing_evidence: list[str] = Field(default_factory=list, description="缺失证据或可靠性边界")
+    next_actions: list[str] = Field(default_factory=list, description="建议继续补充或执行的动作")
     final_answer: str | None = None
     reflection: dict[str, Any] = Field(default_factory=dict)
     audit_summary: dict[str, Any] = Field(default_factory=dict, description="任务级审计摘要")

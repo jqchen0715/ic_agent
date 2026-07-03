@@ -97,8 +97,29 @@ curl -X POST http://127.0.0.1:8000/api/v1/agent/run \
 - `confidence`：任务和步骤置信度。
 - `review_flags`：需要人工复核的原因。
 - `audit_summary`：任务级审计摘要。
+- `answer_mode`：`strict_answer`、`assisted_draft` 或 `refusal`。
+- `evidence_supported`：有工具证据支撑的结论。
+- `draft_suggestions`：需要人工复核的草案建议。
+- `missing_evidence`：缺失证据和可靠性边界。
+- `next_actions`：建议继续补充或执行的动作。
 - `reflection`：反思审查结果。
 - `final_answer`：最终交付。
+
+自主任务默认不是普通问答的替代品，而是 `Assisted Draft` 工作流：
+
+```text
+execute tools/reasoning
+  -> audit_summary
+  -> answer_mode
+     -> strict_answer: 有工具证据、无复核风险，可以写成证据答案
+     -> assisted_draft: 证据不足或存在复核标记，只能输出待复核草案
+     -> refusal: 工具失败且无证据，拒绝交付实质结论
+  -> final_answer 四段式输出
+     -> 证据支持
+     -> 草案建议
+     -> 缺失证据
+     -> 下一步
+```
 
 任务查询：
 
@@ -298,9 +319,10 @@ goal
   -> execute tools/reasoning
   -> collect evidence/confidence/review_flags
   -> recover on failure
-  -> finalize
-  -> reflect
   -> audit_summary
+  -> answer_mode
+  -> finalize as Evidence Answer / Assisted Draft / Refusal
+  -> reflect
   -> remember final result
 ```
 
@@ -311,8 +333,8 @@ goal
 - 工具调用前校验参数 schema，缺参数或多余参数会被拒绝。
 - 工具输出统一归一化为审计记录。
 - LLM scope classifier 只做结构化分类，不允许直接回答用户问题。
-- RAG 未命中时严格拒答或标记 `needs_review`。
-- 普通问答只输出有检索证据支撑的答案；自主任务可以生成草案，但必须标记证据边界和复核风险。
+- RAG 未命中时普通问答严格拒答，自主任务进入 `assisted_draft` 或 `refusal`。
+- 普通问答只输出有检索证据支撑的答案；自主任务可以生成草案，但必须用 `answer_mode` 和四段式交付标记证据边界。
 - SDC 模板会标记默认假设，例如模块名、时钟周期、IO delay 缺失。
 - Verilog 工具会返回规则命中的证据和风险标记。
 - 自主 Agent 遇到工具失败会降级恢复，但任务状态会变成 `needs_review`，不会伪装成完成。
