@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypedDict
 
+from app.core.intent import DomainClassification, ICDomainClassifier
+
 try:
     from langgraph.graph import END, START, StateGraph
 
@@ -51,6 +53,8 @@ class AgentState(TypedDict, total=False):
     needs_clarification: bool
     clarification: str
     strict_miss_marker: str
+    rag_query: str
+    domain_classification: dict[str, Any]
     tool_outputs: list[dict[str, Any]]
     final_answer: str
     model_id: str
@@ -101,6 +105,7 @@ class LangGraphICAgent:
     def __init__(self, model_router: _ModelRouterLike, tool_registry: _ToolRegistryLike) -> None:
         self._model_router = model_router
         self._tools = tool_registry
+        self._domain_classifier = ICDomainClassifier()
         self._graph = self._build_graph() if _LANGGRAPH_AVAILABLE else None
 
     def _build_graph(self) -> Any:
@@ -149,6 +154,8 @@ class LangGraphICAgent:
             "needs_clarification": False,
             "clarification": "",
             "strict_miss_marker": "",
+            "rag_query": "",
+            "domain_classification": {},
         }
         final_state: AgentState
         if self._graph is None:
@@ -202,7 +209,13 @@ class LangGraphICAgent:
                 "selected_tools": [],
             }
 
-        if self._is_short_query(query):
+        scope = await self._domain_classifier.classify(
+            query,
+            model_router=self._model_router,
+            model_preference=state.get("model_preference"),
+        )
+
+        if self._is_short_query(query) and not scope.should_retrieve:
             return {
                 "needs_clarification": True,
                 "clarification": (
@@ -215,22 +228,26 @@ class LangGraphICAgent:
 
         selected: list[str] = []
         available = set(self._tools.list_tool_names())
-        q_lower = query.lower()
+        route_query = scope.normalized_query or query
+        q_lower = f"{query}\n{route_query}".lower()
 
         is_verilog = any(k in q_lower for k in self._VERILOG_KEYWORDS)
         is_timing = any(k in q_lower for k in self._TIMING_KEYWORDS)
         is_knowledge = any(k in query or k in q_lower for k in self._KNOWLEDGE_CUES)
-        has_verilog_code = bool(self._extract_verilog_code(query)) or bool(re.search(r"\b(module|endmodule|always\s*@|assign\s+\w+\s*=)", query, flags=re.I))
-        is_ic_domain = self._is_ic_domain_query(query)
+        has_verilog_code = bool(self._extract_verilog_code(query)) or bool(
+            re.search(r"\b(module|endmodule|always\s*@|assign\s+\w+\s*=)", query, flags=re.I)
+        )
 
-        if not is_ic_domain:
+        if not scope.should_retrieve:
             return {
                 "selected_tools": [],
-                "route_reason": "out_of_scope",
+                "route_reason": f"out_of_scope:{scope.source}:{scope.domain}",
                 "needs_clarification": False,
+                "rag_query": route_query,
+                "domain_classification": _classification_dict(scope),
             }
 
-        if (is_knowledge or is_verilog or is_timing or is_ic_domain) and "ic_rag_search" in available:
+        if "ic_rag_search" in available:
             selected.append("ic_rag_search")
         if is_verilog and has_verilog_code and "verilog_code_analyzer" in available:
             selected.append("verilog_code_analyzer")
@@ -244,39 +261,30 @@ class LangGraphICAgent:
             reason_parts.append("verilog")
         if is_timing:
             reason_parts.append("timing")
-        if is_ic_domain and not reason_parts:
-            reason_parts.append("ic_domain")
+        reason_parts.append(f"scope_{scope.source}_{scope.domain}")
         route_reason = "|".join(reason_parts) if reason_parts else "default_rag"
 
         return {
             "selected_tools": selected,
             "route_reason": route_reason,
             "needs_clarification": False,
+            "rag_query": route_query,
+            "domain_classification": _classification_dict(scope),
         }
 
     def _is_ic_domain_query(self, query: str) -> bool:
-        q = (query or "").lower()
-        domain_terms = (
-            "verilog", "hdl", "rtl", "asic", "fpga", "sdc", "eda", "vlsi",
-            "setup", "hold", "timing", "slack", "sta", "cdc", "violation",
-            "module", "endmodule", "always", "assign", "initial", "wire", "reg",
-            "fork", "join", "defparam", "parameter", "udp", "wait", "$display", "$time",
-            "$stime", "$realtime", "$countdrivers", "posedge", "negedge",
-            "综合", "仿真", "时序", "电路", "芯片", "寄存器", "触发器", "门级",
-            "模块", "实例", "端口", "信号", "注释", "参数", "复位", "时钟", "单元库",
-            "元件", "阻塞", "非阻塞", "硬件描述", "分级名字", "向上引用",
-            "违例", "裕量", "关键路径", "建立时间", "保持时间",
-        )
-        return any(term in q or term in query for term in domain_terms)
+        return self._domain_classifier.classify_by_rules(query) is not None
 
     async def _tool_executor(self, state: AgentState) -> AgentState:
         query = str(state.get("user_query", "")).strip()
+        rag_query = str(state.get("rag_query", "")).strip() or query
         selected_tools = list(state.get("selected_tools") or [])
         outputs: list[dict[str, Any]] = []
         strict_miss_marker = ""
 
         for tool_name in selected_tools:
-            args = self._build_tool_args(tool_name, query, state.get("messages") or [])
+            tool_query = rag_query if tool_name == "ic_rag_search" else query
+            args = self._build_tool_args(tool_name, tool_query, state.get("messages") or [])
             try:
                 audit = await self._invoke_tool_with_audit(tool_name, args)
                 result = str(audit.get("result", ""))
@@ -338,7 +346,7 @@ class LangGraphICAgent:
 
         tool_outputs = list(state.get("tool_outputs") or [])
         if not tool_outputs:
-            if str(state.get("route_reason", "")) == "out_of_scope":
+            if str(state.get("route_reason", "")).startswith("out_of_scope"):
                 return {
                     "final_answer": self._strict_refusal_template(query, "问题不属于当前 IC/Verilog 知识库范围"),
                     "model_id": "strict_refusal",
@@ -784,3 +792,15 @@ class LangGraphICAgent:
             "score": score,
             "chunk_id": chunk_id,
         }
+
+
+def _classification_dict(scope: DomainClassification) -> dict[str, Any]:
+    return {
+        "in_scope": scope.in_scope,
+        "confidence": scope.confidence,
+        "domain": scope.domain,
+        "normalized_query": scope.normalized_query,
+        "reason": scope.reason,
+        "source": scope.source,
+        "should_retrieve": scope.should_retrieve,
+    }

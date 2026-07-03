@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from loguru import logger
 
 from app.core.agent.reflection import ReflectionAgent, ReflectionReport
+from app.core.intent import DomainClassification, ICDomainClassifier
 from app.core.memory.manager import MemoryManager
 from app.models.enums import MessageRole
 from app.models.schemas import AutonomousTask, AutonomousTaskStep, Message
@@ -65,6 +66,7 @@ class AutonomousAgent:
         self._model_router = model_router
         self._tools = tool_registry
         self._memory = memory_manager
+        self._domain_classifier = ICDomainClassifier()
 
     async def run(
         self,
@@ -194,11 +196,44 @@ class AutonomousAgent:
             payload = _extract_json(str(getattr(resp, "content", "") or ""))
             steps = _parse_steps(payload)
             if steps:
-                return steps[:max_steps]
+                scope = await self._domain_classifier.classify(
+                    goal,
+                    model_router=self._model_router,
+                    model_preference=model_preference,
+                )
+                return self._ensure_scope_retrieval_step(goal, steps, scope)[:max_steps]
         except Exception as exc:  # noqa: BLE001
             logger.warning("自主 Agent 规划降级为启发式计划: {}", exc)
 
         return self._heuristic_plan(goal)[:max_steps]
+
+    def _ensure_scope_retrieval_step(
+        self,
+        goal: str,
+        steps: list[AutonomousTaskStep],
+        scope: DomainClassification,
+    ) -> list[AutonomousTaskStep]:
+        if not scope.should_retrieve:
+            return steps
+        if any(step.tool_name == "ic_rag_search" for step in steps):
+            return steps
+
+        retrieval_step = AutonomousTaskStep(
+            id="scope_rag",
+            title="检索 IC 知识库证据",
+            description=(
+                f"基于领域分类结果检索相关片段。domain={scope.domain}; "
+                f"query={scope.normalized_query or goal}"
+            ),
+            action_type="tool",
+            tool_name="ic_rag_search",
+            rationale=(
+                "领域分类器判断该目标应进入 IC/Verilog 知识库检索，"
+                "后续结论需要受检索证据约束。"
+            ),
+        )
+        insert_at = 1 if steps and steps[0].action_type == "reasoning" else 0
+        return [*steps[:insert_at], retrieval_step, *steps[insert_at:]]
 
     def _heuristic_plan(self, goal: str) -> list[AutonomousTaskStep]:
         q = goal.lower()
@@ -300,7 +335,9 @@ class AutonomousAgent:
         step: AutonomousTaskStep,
     ) -> dict[str, Any]:
         if tool_name == "ic_rag_search":
-            return {"query": f"{goal}\n{step.description}"}
+            scope = self._domain_classifier.classify_by_rules(goal)
+            query = scope.normalized_query if scope is not None else goal
+            return {"query": f"{query}\n{step.description}"}
         if tool_name == "verilog_code_analyzer":
             code = _extract_code(goal) or goal
             return {"verilog_code": code}
@@ -493,9 +530,7 @@ class AutonomousAgent:
             logger.warning("自主 Agent 写入记忆失败: {}", exc)
 
     def _is_ic_query(self, goal: str) -> bool:
-        q = goal.lower()
-        terms = ("verilog", "rtl", "sdc", "setup", "hold", "时序", "芯片", "综合", "仿真")
-        return any(term in q or term in goal for term in terms)
+        return self._domain_classifier.classify_by_rules(goal) is not None
 
     def _looks_like_verilog(self, goal: str) -> bool:
         q = goal.lower()
