@@ -4,15 +4,14 @@
 
 **FastAPI + LangGraph + RAG + IC Tools + JSONL Memory + Optional Milvus + Web UI + Autonomous Agent + Reliability Audit**
 
-详细运行与排障手册见：`MERGED_USAGE_MANUAL.md`
-
-项目讲解与面试掌握手册见：`PROJECT_MASTERY_MANUAL.md`
-
 ## 核心能力
 
 - IC 专业问答：支持 `/api/v1/chat` 非流式对话和 `/api/v1/chat/stream` SSE 流式对话。
 - LangGraph 工具路由：`pre_tool_router -> tool_executor -> answer_generator`。
-- IC RAG 检索：基于 LlamaIndex + Chroma + embedding + reranker，返回 `source/page/chunk_id`。
+- IC RAG 检索：基于 LlamaIndex + Chroma，支持 dense + BM25/关键词 hybrid recall + reranker，返回 `source/page/chunk_id`。
+- 统一知识库构建：脚本构建、运行时自动建库、上传 PDF 增量入库共用 `KnowledgeBuilder`。
+- 页码证据链：PDF 按页加载，chunk metadata 中保留 `page/page_start/page_end`。
+- chunk 事实源一致：上传 PDF 后，数据库 `document_chunks` 与向量库 chunks 来自同一批入库对象。
 - 服务端引用治理：最终引用只允许来自本轮真实检索结果，移除模型自造引用。
 - IC 工具调用：内置 `ic_rag_search`、`verilog_code_analyzer`、`timing_constraint_suggester`。
 - 记忆系统：默认短期 JSONL 历史窗口 + 长期 JSONL 关键词召回，支持 `conversation_id` 多轮上下文复用。
@@ -107,6 +106,124 @@ GET /api/v1/agent/tasks
 GET /api/v1/agent/tasks/{task_id}
 ```
 
+### Document API
+
+上传文档：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/documents/upload \
+  -F "file=@data/Verilog 硬件描述语言.pdf"
+```
+
+列出文档：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/documents
+```
+
+上传 PDF 时会同步到 `DATA_PATH`，然后只增量更新这个 PDF 对应的 Chroma chunks，不会全量 rebuild。非 PDF 文件只写入数据库 chunks，不写入向量库。
+
+## 知识库与 RAG 使用
+
+### 目录与配置
+
+默认使用：
+
+```env
+DATA_PATH=data
+CHROMA_PATH=chroma_db
+CHROMA_COLLECTION_NAME=ic_expert
+EMBEDDING_MODEL_PATH=/path/to/bge-m3
+EMBEDDING_DEVICE=cpu
+SOURCE_MISMATCH_STRATEGY=rebuild
+```
+
+把 PDF 放入 `DATA_PATH` 后，可以通过脚本预构建知识库，也可以让第一次检索时自动构建。
+
+### 脚本构建
+
+```bash
+uv run python scripts/build_knowledge.py \
+  --data-dir data \
+  --chroma-path chroma_db \
+  --collection-name ic_expert \
+  --embedding-model /path/to/bge-m3 \
+  --embedding-device cpu
+```
+
+需要清空已有 collection/目录时：
+
+```bash
+uv run python scripts/build_knowledge.py --reset
+```
+
+脚本、上传 API、运行时自动建库都调用同一套 `app/core/rag/knowledge_builder.py`，避免不同入口切分策略、页码 metadata 或 chunk id 不一致。
+
+### 上传增量入库
+
+PDF 上传路径：
+
+```text
+UploadFile
+  -> 保存到 uploads/
+  -> 同步到 DATA_PATH
+  -> KnowledgeBuilder.index_pdf()
+  -> 删除该 PDF 旧 chunks
+  -> 写入该 PDF 新 chunks 到 Chroma
+  -> 用同一批 vector documents 写入 document_chunks
+```
+
+因此：
+
+- 上传新 PDF 不会触发全量 rebuild。
+- 同名文件会自动加 `doc_id` 前缀片段避免覆盖。
+- `document_chunks.vector_id` 对齐向量库 chunk id。
+- `document_chunks.meta` 保留 `source/file_name/file_path/file_hash/chunk_id/page/page_start/page_end/chunk_strategy`。
+
+### Hybrid Retrieval
+
+当前 `ic_rag_search` 的召回链路：
+
+```text
+query expansion
+  -> dense retrieval from Chroma
+  -> BM25/keyword retrieval from Chroma stored chunks
+  -> merge by chunk_id/source/page
+  -> rerank
+  -> citation rewrite
+```
+
+BM25/关键词召回会保留代码和约束中的精确词，例如：
+
+```text
+fork
+join
+defparam
+create_clock
+set_input_delay
+always_comb
+```
+
+可调配置：
+
+```env
+RAG_ENABLE_KEYWORD_RETRIEVAL=true
+RAG_RETRIEVAL_CANDIDATE_K=20
+RAG_KEYWORD_CANDIDATE_K=20
+RAG_DENSE_WEIGHT=0.65
+RAG_KEYWORD_WEIGHT=0.55
+RAG_ENABLE_RERANKER=true
+RAG_RERANK_TOP_K=10
+RAG_RERANKER_MODEL=cross-encoder/bge-reranker-v2-m3
+RAG_RERANKER_DEVICE=cpu
+```
+
+如果只想验证 dense 路径，可以临时设置：
+
+```env
+RAG_ENABLE_KEYWORD_RETRIEVAL=false
+```
+
 ## Agent 主链路
 
 普通问答链路：
@@ -186,10 +303,11 @@ Milvus 不可用时，长期记忆会回退到本地 JSONL 关键词召回。
 - `app/core/agent/langgraph_agent.py`：普通问答 Agent 状态图。
 - `app/core/agent/autonomous.py`：强自主 Agent 计划、执行、恢复、反思和审计。
 - `app/core/memory`：JSONL 短期记忆、JSONL 长期关键词召回、可选 Milvus 长期记忆和记忆管理器。
-- `app/core/rag`：IC RAG 检索、rerank 和引用治理。
+- `app/core/rag`：统一知识库构建、dense/BM25 hybrid 检索、rerank 和引用治理。
 - `app/core/tools`：工具注册、参数校验、审计归一化和 IC 工具实现。
 - `app/static`：无构建前端页面、样式和交互逻辑。
 - `app/etl`：文档解析与 IC 定制分块。
+- `scripts/build_knowledge.py`：命令行构建 Chroma 知识库。
 - `evaluation`：评测集、评测脚本和报告。
 
 ## 目录结构
@@ -214,12 +332,16 @@ project-python/
 │   ├── infrastructure/
 │   └── models/
 ├── evaluation/
+├── scripts/
+│   └── build_knowledge.py
+├── data/
+├── chroma_db/
 ├── tests/
 ├── requirements.txt
 ├── pyproject.toml
 ├── Dockerfile
 ├── docker-compose.yml
-├── PROJECT_MASTERY_MANUAL.md
+├── README.pdf
 └── README.md
 ```
 
